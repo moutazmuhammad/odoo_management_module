@@ -38,6 +38,11 @@
         'views/terminal_template.xml',
         'views/server_backup_database_wizard.xml',
     ],
+    'assets': {
+        'web.assets_backend': [
+            'odoo_server_management/static/src/js/stage_autorefresh.js',
+        ],
+    },
     'installable': True,
     'application': True,
     'auto_install': False,

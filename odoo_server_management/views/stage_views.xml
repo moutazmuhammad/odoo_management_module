@@ -114,7 +114,7 @@
         <field name="name">server.stage.tree</field>
         <field name="model">server.stage</field>
         <field name="arch" type="xml">
-            <tree string="Stages">
+            <tree string="Stages" js_class="server_stage_list">
                 <field name="name"/>
                 <field name="host_id" groups="odoo_server_management.group_operator"/>
                 <field name="odoo_version"/>
