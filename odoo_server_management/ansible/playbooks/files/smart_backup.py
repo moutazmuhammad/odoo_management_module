@@ -77,9 +77,26 @@ def is_odoo_db(db):
 
 
 def _data_dir_candidates():
-    dirs = set()
-    for conf in (glob.glob('/etc/odoo*.conf') + glob.glob('/etc/odoo/*.conf')
-                 + glob.glob('/opt/odoo/*.conf')):
+    """Every plausible Odoo data_dir on this host: from the configs of RUNNING
+    odoo processes (most reliable), conf files on disk, and defaults."""
+    dirs, confs = set(), set()
+    # 1. Running odoo processes: their -c/--config and -D/--data-dir args.
+    try:
+        ps = subprocess.run(['ps', '-eo', 'args'], capture_output=True, text=True).stdout
+    except Exception:
+        ps = ''
+    for line in ps.splitlines():
+        if 'odoo' not in line.lower() and 'openerp' not in line.lower():
+            continue
+        for mm in re.finditer(r'(?:-c|--config)[ =]\s*(\S+)', line):
+            confs.add(mm.group(1))
+        for mm in re.finditer(r'(?:-D|--data-dir)[ =]\s*(\S+)', line):
+            dirs.add(mm.group(1))
+    # 2. Conf files on disk (bounded globs).
+    for pat in ('/etc/odoo*.conf', '/etc/odoo/*.conf', '/etc/*odoo*/*.conf',
+                '/opt/odoo*/*.conf', '/opt/odoo*/*/*.conf', '/opt/*/*.conf'):
+        confs.update(glob.glob(pat))
+    for conf in confs:
         try:
             with open(conf) as fh:
                 for line in fh:
@@ -88,10 +105,11 @@ def _data_dir_candidates():
                         dirs.add(m.group(1))
         except OSError:
             pass
+    # 3. Defaults.
     for home in ('/opt/odoo', '/home/odoo', '/var/lib/odoo', os.path.expanduser('~')):
         dirs.add(os.path.join(home, '.local/share/Odoo'))
     dirs.add('/var/lib/odoo')
-    return dirs
+    return {d for d in dirs if d}
 
 
 def find_filestore(db):
@@ -99,6 +117,17 @@ def find_filestore(db):
         p = os.path.join(d, 'filestore', db)
         if os.path.isdir(p):
             return p
+    # Bounded fallback: search common roots for */filestore/<db>.
+    try:
+        r = subprocess.run(
+            ['find', '/opt', '/home', '/var/lib', '-maxdepth', '7', '-type', 'd',
+             '-path', '*/filestore/' + db, '-print', '-quit'],
+            capture_output=True, text=True, timeout=90)
+        for hit in r.stdout.splitlines():
+            if hit and os.path.isdir(hit):
+                return hit
+    except Exception:
+        pass
     return ''
 
 
