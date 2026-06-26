@@ -35,7 +35,7 @@
                             <field name="last_discovery"/>
                             <field name="auto_stop_enabled" groups="odoo_server_management.group_admin"/>
                         </group>
-                        <group string="Backups">
+                        <group string="Backups" groups="odoo_server_management.group_admin">
                             <field name="backup_project_id"
                                    options="{'no_create_edit': True}"/>
                             <field name="last_backup"/>
