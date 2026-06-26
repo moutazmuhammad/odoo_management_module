@@ -37,6 +37,7 @@ _log = logging.getLogger('terminal_ws')
 WS_PORT = int(os.environ.get('TERM_WS_PORT', 8770))
 WS_BIND = os.environ.get('TERM_WS_BIND', '127.0.0.1')
 GROUP_ADMIN = 'odoo_server_management.group_admin'
+GROUP_OPERATOR = 'odoo_server_management.group_operator'  # implied by admin
 # Optional overrides — let an operator pin the key/user the terminal uses
 # without depending on Odoo's stored config (handy for first-run debugging).
 TERM_SSH_KEY_FILE = os.environ.get('TERM_SSH_KEY_FILE')
@@ -114,8 +115,8 @@ def _verify_and_load(host_id, token):
         user = env['res.users'].browse(uid_i)
         if not user.exists():
             return None, 'user %s not found' % uid_i
-        if not user.has_group(GROUP_ADMIN):
-            return None, 'user %s is not a Server-Management Administrator' % uid_i
+        if not user.has_group(GROUP_OPERATOR):
+            return None, 'user %s is not a Server-Management Operator/Administrator' % uid_i
         host = env['server.host'].browse(int(host_id)).exists()
         if not host:
             return None, 'host %s not found' % host_id

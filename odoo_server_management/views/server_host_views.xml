@@ -16,7 +16,7 @@
                             string="Check Status" class="btn-secondary" icon="fa-refresh"/>
                     <button name="action_open_terminal" type="object"
                             string="Open Terminal" class="btn-dark" icon="fa-terminal"
-                            groups="odoo_server_management.group_admin"/>
+                            groups="odoo_server_management.group_operator"/>
                     <field name="key_authorized" widget="boolean_toggle" readonly="1"
                            string="Connection Verified"/>
                 </header>

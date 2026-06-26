@@ -102,8 +102,8 @@ class ServerHost(models.Model):
             ))
 
     def action_open_terminal(self):
-        """Open the admin-only web SSH console for this host (new tab)."""
-        self.env['server.stage']._check_access(GROUP_ADMIN)
+        """Open the web SSH console for this host (new tab). Operator+ allowed."""
+        self.env['server.stage']._check_access(GROUP_OPERATOR)
         self.ensure_one()
         self._require_key()
         return {

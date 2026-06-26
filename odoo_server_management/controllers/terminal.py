@@ -7,6 +7,7 @@ from odoo.http import request
 from odoo.exceptions import AccessError
 
 GROUP_ADMIN = 'odoo_server_management.group_admin'
+GROUP_OPERATOR = 'odoo_server_management.group_operator'  # implied by admin
 TOKEN_TTL = 300  # seconds — headroom for page load + minor clock skew
 
 
@@ -15,13 +16,14 @@ def _sign(secret, msg):
 
 
 class ServerTerminalController(http.Controller):
-    """Admin-only real terminal: renders an xterm.js page that connects to the
+    """Operator/Admin real terminal: renders an xterm.js page that connects to the
     WebSocket PTY bridge (static/ws/terminal_server.py). The session is the
     authorization; a short-lived signed token authenticates to the WS server."""
 
     def _admin_host(self, host_id):
-        if not request.env.user.has_group(GROUP_ADMIN):
-            raise AccessError(_("Only administrators can open a server terminal."))
+        # Operator+ may open the terminal (admin implies operator).
+        if not request.env.user.has_group(GROUP_OPERATOR):
+            raise AccessError(_("Only operators or administrators can open a server terminal."))
         host = request.env['server.host'].sudo().browse(host_id).exists()
         if not host:
             raise request.not_found()
