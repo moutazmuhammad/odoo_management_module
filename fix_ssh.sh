@@ -20,7 +20,10 @@ done
 # 2. Make sshd actually listen on ALL interfaces:PORT (key auth untouched).
 if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.socket'; then
   mkdir -p /etc/systemd/system/ssh.socket.d
-  printf '[Socket]\nListenStream=\nListenStream=%s\n' "$PORT" > /etc/systemd/system/ssh.socket.d/port.conf
+  # Bind IPv4 *and* IPv6 explicitly. A bare "ListenStream=7812" inherits the
+  # base socket's BindIPv6Only=ipv6-only and ends up IPv6-only -> IPv4 refused.
+  printf '[Socket]\nBindIPv6Only=both\nListenStream=\nListenStream=0.0.0.0:%s\nListenStream=[::]:%s\n' "$PORT" "$PORT" \
+    > /etc/systemd/system/ssh.socket.d/port.conf
   systemctl daemon-reload
   systemctl reset-failed ssh.socket ssh.service 2>/dev/null
   systemctl stop ssh.service 2>/dev/null
