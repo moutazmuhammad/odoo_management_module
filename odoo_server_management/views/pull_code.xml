@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+
+    <!-- REPOSITORY ACTION & VIEWS -->
+    <record id="action_server_repository" model="ir.actions.act_window">
+        <field name="name">Git Repositories</field>
+        <field name="res_model">server.repository</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="view_server_repository_tree" model="ir.ui.view">
+        <field name="name">server.repository.tree</field>
+        <field name="model">server.repository</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="name"/>
+                <field name="url"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_server_repository_form" model="ir.ui.view">
+        <field name="name">server.repository.form</field>
+        <field name="model">server.repository</field>
+        <field name="arch" type="xml">
+            <form string="Git Repository">
+                <sheet>
+                    <group>
+                        <field name="name"/>
+                        <field name="url"/>
+                    </group>
+                    <notebook>
+                        <page string="Branches">
+                            <field name="branches">
+                                <tree editable="bottom">
+                                    <field name="name"/>
+                                </tree>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- STAGE REPO PATH ACTION & VIEWS -->
+    <record id="action_stage_repo_branch_path" model="ir.actions.act_window">
+        <field name="name">Stage Repo Paths</field>
+        <field name="res_model">server.stage.repo.branch.path</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="view_stage_repo_branch_path_tree" model="ir.ui.view">
+        <field name="name">server.stage.repo.branch.path.tree</field>
+        <field name="model">server.stage.repo.branch.path</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="stage_id"/>
+                <field name="repository_id" options="{'no_open': True}"/>
+                <field name="branch_id" options="{'no_open': True}"/>
+                <field name="pull_path"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_stage_repo_branch_path_form" model="ir.ui.view">
+        <field name="name">server.stage.repo.branch.path.form</field>
+        <field name="model">server.stage.repo.branch.path</field>
+        <field name="arch" type="xml">
+            <form string="Stage Repo Branch Path">
+                <sheet>
+                    <group>
+                        <field name="stage_id" options="{'no_open': True}"/>
+                        <field name="repository_id" options="{'no_open': True}"/>
+                        <field name="branch_id" options="{'no_open': True}"/>
+                        <field name="pull_path" groups="odoo_server_management.group_admin"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+
+    <!-- Submenu Group -->
+    <menuitem id="menu_repo_management"
+              name="Repository Management"
+              parent="menu_server_management"
+              sequence="1" groups="odoo_server_management.group_admin"/>
+
+    <!-- Child Menus under Repository Management -->
+    <menuitem id="menu_git_repositories"
+              name="Git Repositories"
+              parent="menu_repo_management"
+              action="action_server_repository"
+              sequence="1"/>
+
+    <menuitem id="menu_stage_repo_paths"
+              name="Stage Repo Paths"
+              parent="menu_repo_management"
+              action="action_stage_repo_branch_path"
+              sequence="2"/>
+
+</odoo>
+
+
+

@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_stage_form" model="ir.ui.view">
+        <field name="name">server.stage.form</field>
+        <field name="model">server.stage</field>
+        <field name="arch" type="xml">
+            <form string="Stage">
+                <header>
+                    <!-- Unrestricted copies so button attrs can read them for all groups.
+                         can_act = False means: Client Server + current user is not Operator+. -->
+                    <field name="client_stage" invisible="1"/>
+                    <field name="can_act" invisible="1"/>
+                    <button name="action_check_status" type="object"
+                            string="Check Status" icon="fa-refresh" class="btn-secondary"
+                            groups="odoo_server_management.group_user"/>
+                    <field name="odoo_status" nolabel="1" readonly="1" force_save="1" style="font-weight: bold;"/>
+
+                    <button name="action_backup_database" type="object" string="Backup URL"
+                            class="btn-primary" icon="fa-database"
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+
+                    <button name="action_upgrade_module" string="Upgrade Module" type="object"
+                            class="btn-primary" icon="fa-refresh"
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+
+                    <button name="action_view_logs_stream" type="object" string="View Logs"
+                            class="btn-primary" icon="fa-terminal"
+                            groups="odoo_server_management.group_user"/>
+
+                    <button name="action_view_conf_file" type="object" string="View Conf File"
+                            class="btn btn-primary" icon="fa-file-text"
+                            groups="odoo_server_management.group_user"/>
+
+                    <button name="action_pull_code" type="object" string="Pull Code"
+                            class="btn btn-primary" icon="fa-download"
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+
+                    <button name="action_start_service" type="object" string="Start"
+                            class="btn btn-success" icon="fa-play"
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+
+                    <button name="action_stop_service" type="object" string="Stop"
+                            class="btn btn-danger" icon="fa-stop"
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+
+                    <button name="action_restart_service" type="object" string="Restart"
+                            class="btn btn-warning" icon="fa-refresh"
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                </header>
+
+                <sheet>
+                    <div class="oe_title">
+                        <label for="name"/>
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <group>
+                        <field name="client_stage" widget="boolean_toggle"
+                               groups="odoo_server_management.group_admin"/>
+                        <field name="notes"/>
+                    </group>
+                    <notebook>
+                        <page string="General Info">
+                            <group>
+                                <group>
+                                    <field name="host_id" groups="odoo_server_management.group_operator"/>
+                                    <field name="service_name" groups="odoo_server_management.group_operator"/>
+                                    <field name="odoo_version"/>
+                                    <field name="needs_review" readonly="1"/>
+                                </group>
+                                <group groups="odoo_server_management.group_admin">
+                                    <field name="log_file_path"/>
+                                    <field name="upgrade_module_path"/>
+                                    <field name="conf_file"/>
+                                    <field name="odoo_bin"/>
+                                    <field name="python_bin"/>
+                                </group>
+                            </group>
+                        </page>
+
+                        <page string="Access Info" groups="odoo_server_management.group_admin">
+                            <group>
+                                <group string="Odoo Service Secret">
+                                    <field name="admin_password" password="True"/>
+                                </group>
+                                <group string="Odoo Access">
+                                    <field name="odoo_user" password="True"/>
+                                </group>
+                            </group>
+                        </page>
+
+                        <page string="Branch Configuration" groups="odoo_server_management.group_admin">
+                            <group>
+                                <field name="repo_branch_paths">
+                                    <tree editable="bottom">
+                                        <field name="repository_id"/>
+                                        <field name="branch_id"/>
+                                    </tree>
+                                </field>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_stage_tree" model="ir.ui.view">
+        <field name="name">server.stage.tree</field>
+        <field name="model">server.stage</field>
+        <field name="arch" type="xml">
+            <tree string="Stages">
+                <field name="name"/>
+                <field name="host_id" groups="odoo_server_management.group_operator"/>
+                <field name="odoo_version"/>
+                <field name="odoo_status"/>
+                <field name="needs_review" readonly="1"/>
+                <field name="client_stage" widget="boolean_toggle" readonly="1"
+                       groups="odoo_server_management.group_admin"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_stage_search" model="ir.ui.view">
+        <field name="name">server.stage.search</field>
+        <field name="model">server.stage</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="host_id"/>
+                <filter string="Server" name="group_by_host" context="{'group_by': 'host_id'}"/>
+                <filter string="Odoo Version" name="group_by_version" context="{'group_by': 'odoo_version'}"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_stage" model="ir.actions.act_window">
+        <field name="name">Stages</field>
+        <field name="res_model">server.stage</field>
+        <field name="view_mode">tree,form</field>
+        <field name="context">{}</field>
+    </record>
+
+    <menuitem id="menu_stages" name="Stages" parent="menu_server_management"
+              action="action_stage" sequence="20"
+              groups="odoo_server_management.group_user"/>
+</odoo>

@@ -1,0 +1,122 @@
+---
+# Private database backup.
+#
+# Security (M2/M3):
+#   - Bucket, region, object prefix, retention window and signed-URL TTL are all
+#     passed in as variables (no hardcoded infra).
+#   - The dump is uploaded as a PRIVATE object (no --acl-public). The download
+#     link is a short-lived, signed URL generated with `s3cmd signurl`, so the
+#     backup is not publicly enumerable.
+- hosts: all
+  gather_facts: no
+  become: no
+  vars:
+    bucket_name: "{{ backup_bucket }}"
+    region: "{{ backup_region }}"
+    prefix: "{{ backup_prefix | default('REAL-TIME') }}"
+    retention_days: "{{ backup_retention_days | default(1) }}"
+    sign_ttl: "{{ backup_signed_url_ttl | default(3600) }}"
+    backup_format: "{{ backup_format | default('zip') }}"
+  tasks:
+    - name: Run backup script inline
+      no_log: true
+      shell: |
+        ADMIN_PASSWORD={{ admin_password | quote }}
+        URL={{ url | quote }}
+        DATABASE_NAME={{ database_name | quote }}
+        BUCKET_NAME={{ bucket_name | quote }}
+        REGION={{ region | quote }}
+        PREFIX={{ prefix | quote }}
+        RETENTION_DAYS={{ retention_days | quote }}
+        SIGN_TTL={{ sign_ttl | quote }}
+        BACKUP_FORMAT={{ backup_format | quote }}
+        # Match Odoo: zip -> .zip (with filestore), dump -> .dump (SQL only).
+        EXT="zip"; [ "$BACKUP_FORMAT" = "dump" ] && EXT="dump"
+        TEMP_FILE="${DATABASE_NAME}-$(date +'%d_%m_%Y_%H_%M').${EXT}"
+        URL_PATH="/web/database/backup"
+        S3_HOST="$REGION.digitaloceanspaces.com"
+        S3_HOST_BUCKET="%(bucket)s.$REGION.digitaloceanspaces.com"
+
+        current_date=$(date +%s)
+
+        # Prune backups older than the retention window.
+        s3cmd ls "s3://$BUCKET_NAME/$PREFIX/" \
+          --host="$S3_HOST" \
+          --host-bucket="$S3_HOST_BUCKET" | \
+        while read -r line; do
+            if [[ "$line" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})\ ([0-9]{2}:[0-9]{2})\ +([0-9]+)\ +(.+)$ ]]; then
+                file_date="${BASH_REMATCH[1]}"
+                file_time="${BASH_REMATCH[2]}"
+                file_path="${BASH_REMATCH[4]}"
+
+                echo "Processing file: $file_path, Date: $file_date $file_time" >&2
+
+                if ! file_timestamp=$(date -d "$file_date $file_time" +%s 2>/dev/null); then
+                    echo "Error: Failed to parse date for $file_path" >&2
+                    continue
+                fi
+
+                difference=$(( (current_date - file_timestamp) / 86400 ))
+                if [ "$difference" -gt "$RETENTION_DAYS" ]; then
+                    echo "Deleting file: $file_path (Age: $difference days)" >&2
+                    if s3cmd del "$file_path" \
+                      --host="$S3_HOST" \
+                      --host-bucket="$S3_HOST_BUCKET"; then
+                        echo "Successfully deleted $file_path" >&2
+                    else
+                        echo "Error: Failed to delete $file_path" >&2
+                    fi
+                else
+                    echo "Keeping file: $file_path (Age: $difference days)" >&2
+                fi
+            else
+                echo "Error: Failed to parse line: $line" >&2
+            fi
+        done
+
+        if curl -sSf -X POST \
+            -F "master_pwd=$ADMIN_PASSWORD" \
+            -F "name=$DATABASE_NAME" \
+            -F "backup_format=$BACKUP_FORMAT" \
+            -o "$TEMP_FILE" "$URL$URL_PATH"; then
+
+            OBJECT_KEY="s3://$BUCKET_NAME/$PREFIX/${TEMP_FILE}"
+
+            # Upload as a PRIVATE object (no --acl-public).
+            if s3cmd put "$TEMP_FILE" "$OBJECT_KEY" \
+                --host="$S3_HOST" \
+                --host-bucket="$S3_HOST_BUCKET" \
+                > /dev/null 2>&1; then
+
+                # Generate a short-lived signed URL for download.
+                expiry=$(( current_date + SIGN_TTL ))
+                DOWNLOAD_URL=$(s3cmd signurl "$OBJECT_KEY" "$expiry" \
+                    --host="$S3_HOST" \
+                    --host-bucket="$S3_HOST_BUCKET" 2>/dev/null)
+
+                if [ -z "$DOWNLOAD_URL" ]; then
+                    echo "{\"status\":\"error\", \"message\":\"Failed to sign URL\"}"
+                    rm -f "$TEMP_FILE"
+                    exit 1
+                fi
+
+                echo "{\"status\":\"success\", \"download_url\":\"$DOWNLOAD_URL\"}"
+            else
+                echo "{\"status\":\"error\", \"message\":\"Failed to upload to S3\"}"
+                rm -f "$TEMP_FILE"
+                exit 1
+            fi
+        else
+            echo "{\"status\":\"error\", \"message\":\"Failed to backup database\"}"
+            rm -f "$TEMP_FILE"
+            exit 1
+        fi
+
+        rm -f "$TEMP_FILE"
+      args:
+        executable: /bin/bash
+      register: backup_result
+
+    - name: Return JSON only
+      debug:
+        msg: "{{ backup_result.stdout }}"

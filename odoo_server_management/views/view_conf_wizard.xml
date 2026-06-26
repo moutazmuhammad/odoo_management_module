@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="view_server_view_conf_wizard_form" model="ir.ui.view">
+        <field name="name">server.view.conf.wizard.form</field>
+        <field name="model">server.view.conf.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Configuration File">
+                <style>
+                    .o_conf_path{font-family:Menlo,Consolas,monospace;color:#0b5cad;font-size:13px;word-break:break-all;}
+                    .o_conf_box .o_field_text, .o_conf_box textarea{
+                        font-family:"JetBrains Mono",Menlo,Consolas,monospace !important;
+                        font-size:12.5px !important; line-height:1.6 !important;
+                        white-space:pre !important; background:#f6f8fa; color:#1f2328;
+                        border:1px solid #d0d7de !important; border-radius:6px;
+                        padding:12px !important; display:block; width:100%;
+                        min-height:58vh; max-height:70vh; overflow:auto;}
+                </style>
+                <div class="p-2">
+                    <div class="mb-2">
+                        <span style="font-weight:600;">📄 Configuration file: </span>
+                        <span class="o_conf_path"><field name="conf_file" nolabel="1" readonly="1"/></span>
+                    </div>
+                    <div class="o_conf_box">
+                        <field name="conf_content" nolabel="1" readonly="1" widget="text"/>
+                    </div>
+                    <div style="color:#656d76;font-size:11px;margin-top:6px;">
+                        🔒 Sensitive keys (passwords, DB credentials, ports) are hidden.
+                    </div>
+                </div>
+                <footer>
+                    <button string="Close" class="btn-primary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

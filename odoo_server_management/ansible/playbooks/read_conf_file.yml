@@ -1,0 +1,13 @@
+---
+- hosts: all
+  gather_facts: no
+  tasks:
+    - name: Read conf file content
+      ansible.builtin.command:
+        cmd: "cat {{ conf_file }}"
+      register: conf_output
+      ignore_errors: yes
+
+    - name: Print content
+      debug:
+        msg: "{{ conf_output.stdout }}"

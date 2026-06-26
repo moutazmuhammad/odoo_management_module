@@ -1,0 +1,24 @@
+---
+# Auto-detect every Odoo service on the host, regardless of service name or
+# Odoo version. The detection logic lives in files/discover.py and is run via
+# the `script` module (so Ansible never parses the Python source). It emits a
+# base64-wrapped JSON array consumed by server.host._parse_discovery.
+#
+# Read-only. become defaults to no so it works for SSH users without sudo; the
+# script self-escalates with passwordless sudo only where needed (addons dirs /
+# git repos owned by the odoo user). Set discover_become=true to run it all as
+# root on servers whose Odoo .conf files are readable only by root.
+- hosts: all
+  gather_facts: no
+  become: "{{ discover_become | default(false) }}"
+  tasks:
+    - name: Discover Odoo instances
+      script: files/discover.py
+      args:
+        executable: python3
+      register: discover_out
+      changed_when: false
+
+    - name: Emit discovery payload
+      debug:
+        msg: "{{ discover_out.stdout }}"

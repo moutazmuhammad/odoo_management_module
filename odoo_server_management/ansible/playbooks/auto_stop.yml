@@ -1,0 +1,18 @@
+---
+# Stop systemd services that have been running longer than N days. Logic lives
+# in files/auto_stop.py (run via the `script` module); the script self-escalates
+# with passwordless sudo to stop each stale service.
+- hosts: all
+  gather_facts: no
+  become: no
+  tasks:
+    - name: Auto-stop stale instances
+      script: files/auto_stop.py {{ spec | quote }}
+      args:
+        executable: python3
+      register: autostop_out
+      changed_when: false
+
+    - name: Emit auto-stop result
+      debug:
+        msg: "{{ autostop_out.stdout }}"

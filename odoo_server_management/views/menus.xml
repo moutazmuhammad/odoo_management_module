@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Root menu (children defined in the other view files) -->
+    <menuitem id="menu_server_management" name="Server Management" sequence="10"/>
+</odoo>

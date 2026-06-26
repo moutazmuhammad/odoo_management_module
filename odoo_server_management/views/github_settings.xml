@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <!-- GitHub Settings View -->
+    <record id="view_github_settings_form" model="ir.ui.view">
+        <field name="name">server.github.settings.form</field>
+        <field name="model">server.github.settings</field>
+        <field name="arch" type="xml">
+            <form string="GitHub Configuration">
+                <sheet>
+                    <group string="GitHub">
+                        <field name="github_user"/>
+                        <field name="github_token_is_set" invisible="1"/>
+                        <div colspan="2" attrs="{'invisible': [('github_token_is_set','=',False)]}">
+                            <span class="text-success">✔ A GitHub token is configured.</span>
+                            Type a new one only to replace it.
+                        </div>
+                        <field name="github_token" password="True"
+                               placeholder="leave empty to keep the current token"/>
+                    </group>
+                    <group string="SSH (single global key — key auth only, no password)">
+                        <field name="ssh_default_user"/>
+                        <field name="ssh_default_port"/>
+                        <field name="ssh_key_is_set" invisible="1"/>
+                        <div colspan="2" attrs="{'invisible': [('ssh_key_is_set','=',False)]}">
+                            <span class="text-success">✔ An SSH key is configured.</span>
+                            Upload or paste a new one below only to replace it.
+                        </div>
+                        <field name="ssh_private_key_filename" invisible="1"/>
+                        <field name="ssh_private_key_upload" widget="binary"
+                               filename="ssh_private_key_filename"/>
+                        <field name="ssh_private_key" widget="text"
+                               placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...leave empty to keep the current key; paste a new one here to replace it..."/>
+                        <field name="ssh_private_key_file" placeholder="(optional) /home/odoo/.ssh/id_ed25519"/>
+                    </group>
+                    <group string="Database Backups (private object storage)">
+                        <field name="backup_bucket"/>
+                        <field name="backup_region"/>
+                        <field name="backup_prefix"/>
+                        <field name="backup_retention_days"/>
+                        <field name="backup_signed_url_ttl"/>
+                    </group>
+                    <group string="Auto-Stop Instances">
+                        <field name="auto_stop_days"/>
+                        <div colspan="2" class="text-muted" style="font-size:12px;">
+                            Daily, instances on servers with <b>Stop Instances</b> on (and whose
+                            <b>Auto-Stop</b> is ticked) are stopped once their service has been
+                            running longer than this many days. Set 0 to disable.
+                        </div>
+                    </group>
+                    <group string="User Signup (self-registration → 'User' role only)">
+                        <field name="signup_enabled"/>
+                        <field name="signup_allowed_domains"
+                               placeholder="exp-sa.com, odex.sa"
+                               attrs="{'invisible': [('signup_enabled', '=', False)]}"/>
+                    </group>
+                    <footer>
+                        <button string="Save" type="object" name="set_values" class="btn-primary"/>
+                        <button string="Cancel" class="btn-secondary" special="cancel"/>
+                    </footer>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Action to open settings from menu -->
+    <record id="action_github_settings" model="ir.actions.act_window">
+        <field name="name">GitHub Configuration</field>
+        <field name="res_model">server.github.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <!-- Menu item under Settings -->
+    <menuitem id="menu_github_settings"
+              name="GitHub Configuration"
+              parent="menu_repo_management"
+              action="action_github_settings"
+              sequence="10"
+              groups="odoo_server_management.group_admin"/>
+</odoo>
+

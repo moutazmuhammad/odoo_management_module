@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+
+  <record id="view_upgrade_module_wizard_form" model="ir.ui.view">
+      <field name="name">server.upgrade.module.wizard.form</field>
+      <field name="model">server.upgrade.module.wizard</field>
+      <field name="arch" type="xml">
+          <form string="Upgrade Module">
+              <group>
+                  <field name="stage_id" invisible="1"/>
+                  <field name="database_name"/>
+                  <field name="module_name"/>
+              </group>
+              <footer>
+                  <button string="Upgrade" type="object" name="action_upgrade" class="btn-primary"/>
+                  <button string="Cancel" class="btn-secondary" special="cancel"/>
+              </footer>
+          </form>
+      </field>
+  </record>
+
+
+</odoo>

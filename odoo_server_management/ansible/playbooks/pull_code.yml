@@ -1,0 +1,35 @@
+---
+- hosts: all
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Remove .pyc files before pull
+      ansible.builtin.shell: |
+        find {{ path | quote }} -name "*.pyc" -delete
+      become_user: "{{ odoo_user }}"
+      args:
+        executable: /bin/bash
+
+    - name: Git stash and pull with credentials (without saving remote)
+      ansible.builtin.shell: |
+        set -e
+        cd {{ path | quote }}
+        # Stash local changes only if there are any, and remember whether WE
+        # created the stash so we drop ONLY ours — never touch other stashes.
+        STASHED=0
+        if git stash push -u -m "odoo-server-mgmt auto-pull" 2>&1 | grep -q "Saved working directory"; then
+          STASHED=1
+        fi
+        git pull "https://{{ github_user }}:{{ github_token }}@{{ repo_url | regex_replace('^https?://', '') }}" {{ branch_name | quote }}
+        if [ "$STASHED" = "1" ]; then
+          git stash drop
+        fi
+      args:
+        executable: /bin/bash
+      become_user: "{{ odoo_user }}"
+      no_log: true
+
+    - name: Restart Odoo service
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: restarted

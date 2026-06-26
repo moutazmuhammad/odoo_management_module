@@ -1,0 +1,18 @@
+---
+# List the PostgreSQL databases belonging to one Odoo instance, scoped by the
+# conf's db_user (and db_name / dbfilter). Logic lives in files/list_databases.py
+# and is run via the `script` module (no Ansible quote-parsing of the source).
+- hosts: all
+  gather_facts: no
+  become: no
+  tasks:
+    - name: List databases for the host's instances
+      script: files/list_databases.py {{ spec | quote }}
+      args:
+        executable: python3
+      register: dblist_out
+      changed_when: false
+
+    - name: Emit database list
+      debug:
+        msg: "{{ dblist_out.stdout }}"

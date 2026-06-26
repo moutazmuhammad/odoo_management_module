@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Host form: type an IP, authorize the key, auto-discover everything -->
+    <record id="view_server_host_form" model="ir.ui.view">
+        <field name="name">server.host.form</field>
+        <field name="model">server.host</field>
+        <field name="arch" type="xml">
+            <form string="Server Host">
+                <header>
+                    <button name="action_test_connection" type="object"
+                            string="Test Connection" class="btn-info" icon="fa-plug"/>
+                    <button name="action_discover" type="object"
+                            string="Discover Instances" class="btn-primary"
+                            icon="fa-search"/>
+                    <button name="action_check_status" type="object"
+                            string="Check Status" class="btn-secondary" icon="fa-refresh"/>
+                    <button name="action_open_terminal" type="object"
+                            string="Open Terminal" class="btn-dark" icon="fa-terminal"
+                            groups="odoo_server_management.group_admin"/>
+                    <field name="key_authorized" widget="boolean_toggle" readonly="1"
+                           string="Connection Verified"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <label for="name"/>
+                        <h1><field name="name" placeholder="My Production Server"/></h1>
+                    </div>
+                    <group>
+                        <group string="Connection">
+                            <field name="ip" placeholder="192.168.1.10"/>
+                            <field name="ssh_port"/>
+                        </group>
+                        <group string="Status">
+                            <field name="instance_count"/>
+                            <field name="last_discovery"/>
+                            <field name="auto_stop_enabled" groups="odoo_server_management.group_admin"/>
+                        </group>
+                    </group>
+                    <field name="notes" placeholder="Notes..."/>
+                    <notebook>
+                        <page string="Detected Instances">
+                            <field name="stage_ids">
+                                <tree editable="bottom" create="false" delete="false">
+                                    <field name="service_name" readonly="1"/>
+                                    <field name="odoo_version" readonly="1"/>
+                                    <field name="conf_file" readonly="1"
+                                           groups="odoo_server_management.group_admin"/>
+                                    <field name="needs_review" readonly="1"/>
+                                    <field name="odoo_status" readonly="1"/>
+                                    <field name="auto_stop" groups="odoo_server_management.group_admin"/>
+                                </tree>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_server_host_tree" model="ir.ui.view">
+        <field name="name">server.host.tree</field>
+        <field name="model">server.host</field>
+        <field name="arch" type="xml">
+            <tree string="Server Hosts">
+                <field name="name"/>
+                <field name="ip"/>
+                <field name="instance_count"/>
+                <field name="key_authorized" widget="boolean_toggle" readonly="1"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="action_server_host" model="ir.actions.act_window">
+        <field name="name">Servers</field>
+        <field name="res_model">server.host</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <menuitem id="menu_server_hosts" name="Servers"
+              parent="menu_server_management"
+              action="action_server_host" sequence="15"
+              groups="odoo_server_management.group_operator"/>
+</odoo>

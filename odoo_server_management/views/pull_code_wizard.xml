@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+
+    <record id="view_pull_code_wizard_form" model="ir.ui.view">
+        <field name="name">server.pull.wizard.form</field>
+        <field name="model">server.pull.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Pull Code">
+                <group>
+                    <field name="stage_id" readonly="1"/>
+                    <field name="repo_branch_path_id" options="{'no_create': True}"/>
+                </group>
+                <footer>
+                    <button name="action_confirm_pull"
+                            type="object"
+                            string="Pull"
+                            class="btn-primary"/>
+                    <button string="Cancel" special="cancel" class="btn-secondary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+</odoo>
+

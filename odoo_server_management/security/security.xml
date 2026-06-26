@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="group_category_project_roles" model="ir.module.category">
+        <field name="name">Server Management</field>
+        <field name="description">Access levels for the Server Management module</field>
+    </record>
+
+    <!-- User: can perform operational actions on instances, but does not see
+         sensitive details (passwords, paths, conf) nor manage servers. -->
+    <record id="group_user" model="res.groups">
+        <field name="name">User</field>
+        <field name="category_id" ref="group_category_project_roles"/>
+    </record>
+
+    <!-- Operator: a User who can also see the Servers and run Discovery / Test
+         Connection (onboard and refresh hosts). -->
+    <record id="group_operator" model="res.groups">
+        <field name="name">Operator</field>
+        <field name="category_id" ref="group_category_project_roles"/>
+        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
+    </record>
+
+    <!-- Administrator: an Operator who can also see every detail (secrets,
+         paths, conf) and manage the global Settings. -->
+    <record id="group_admin" model="res.groups">
+        <field name="name">Administrator</field>
+        <field name="category_id" ref="group_category_project_roles"/>
+        <field name="implied_ids" eval="[(4, ref('group_operator'))]"/>
+    </record>
+
+</odoo>

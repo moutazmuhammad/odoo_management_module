@@ -1,0 +1,24 @@
+---
+- hosts: all
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Stop Odoo Service
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: stopped
+
+    - name: Upgrade Odoo Module
+      shell: >
+        {{ upgrade_module_path }}
+        -d {{ database_name | quote }}
+        -u {{ module_name | quote }}
+        --stop-after-init
+      args:
+        executable: /bin/bash
+      become_user: "{{ odoo_user }}"
+
+    - name: Restart Odoo Service
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: restarted
