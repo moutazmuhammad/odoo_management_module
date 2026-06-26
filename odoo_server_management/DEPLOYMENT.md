@@ -186,10 +186,11 @@ After=network.target postgresql.service
 
 [Service]
 User=odoo
+# Point the bridge at Odoo's own config so it connects to PostgreSQL EXACTLY
+# like Odoo (incl. db_host=False -> local unix socket + peer auth, no password).
+# This is the robust way — no need to duplicate db host/user/password here.
+Environment=ODOO_RC=/etc/odoo.conf
 Environment=ODOO_DB=YOUR_DB
-Environment=ODOO_DB_HOST=127.0.0.1
-Environment=ODOO_DB_USER=odoo
-Environment=ODOO_DB_PASSWORD=YOUR_DB_PASSWORD
 Environment=ODOO_ADDONS_PATH=/path/to/addons,/usr/lib/python3/dist-packages/odoo/addons
 Environment=ODOO_SERVER_MGMT_KEY=YOUR_FERNET_KEY
 Environment=TERM_WS_BIND=127.0.0.1
@@ -200,6 +201,11 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 ```
+> Run the bridge as the **same OS user as Odoo** (`User=odoo`) so socket/peer DB
+> auth works. `ODOO_RC` is strongly preferred over hand-set `ODOO_DB_HOST/USER/
+> PASSWORD` — mismatched DB env vars cause `password authentication failed` and
+> the terminal closes with an internal error. (Those env vars still work as a
+> fallback when no config file is present.)
 ```bash
 systemctl daemon-reload && systemctl enable --now odoo-terminal
 ```
@@ -250,6 +256,8 @@ is short‑lived and the bridge re‑checks Administrator membership server‑si
 | Restart "succeeds" but nothing happens | SSH user lacks passwordless sudo on the managed server. |
 | Empty database/module dropdowns | Run **Discover**; ensure `psql`/`git` exist on the server and the SSH user has sudo. |
 | Terminal shows "connecting…" forever | Bridge service not running, or nginx `/terminal/ws/` not proxied, or `server.terminal.ws_url` wrong. |
+| Terminal connects then closes / "internal error" / "Terminal authorization failed: cannot reach Odoo database" | Bridge can't reach PostgreSQL — its DB env doesn't match Odoo. Set `Environment=ODOO_RC=/etc/odoo.conf`, run the bridge as `User=odoo`, remove any wrong `ODOO_DB_HOST/PASSWORD`, then `systemctl restart`. Check `journalctl -u odoo-terminal`. |
+| Locked out of SSH after `harden_server.sh` (Connection refused on the new port) | sshd bound IPv6-only. From the cloud provider's web console: `ss -tlnp \| grep <port>` — if it shows only `[::]:<port>`, recreate `/etc/systemd/system/ssh.socket.d/port.conf` with `ListenStream=0.0.0.0:<port>` and `ListenStream=[::]:<port>`, then `systemctl daemon-reload && systemctl restart ssh.socket`. |
 | Backup fails | `s3cmd` not installed/configured on the managed server, or bucket/region wrong. |
 | Blank/white Odoo page after deploy | Regenerate web assets (delete `ir.attachment` asset bundles and reload). |
 

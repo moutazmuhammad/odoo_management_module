@@ -36,7 +36,6 @@ _log = logging.getLogger('terminal_ws')
 
 WS_PORT = int(os.environ.get('TERM_WS_PORT', 8770))
 WS_BIND = os.environ.get('TERM_WS_BIND', '127.0.0.1')
-ODOO_DB = os.environ.get('ODOO_DB', 'odoo')
 GROUP_ADMIN = 'odoo_server_management.group_admin'
 # Optional overrides — let an operator pin the key/user the terminal uses
 # without depending on Odoo's stored config (handy for first-run debugging).
@@ -47,11 +46,27 @@ TERM_SSH_USER = os.environ.get('TERM_SSH_USER')
 import odoo  # noqa: E402
 from odoo.tools import config  # noqa: E402
 
+# Connect to PostgreSQL EXACTLY like the Odoo server does. Preferring Odoo's own
+# config file means we inherit db_host/db_user/db_password verbatim — including
+# the common `db_host = False` (local unix socket + peer auth, no password).
+# This avoids "password authentication failed" when hand-set ODOO_DB_* env vars
+# don't match the real DB (e.g. a TCP host forcing password auth that isn't set).
+_ODOO_RC = (os.environ.get('ODOO_RC') or os.environ.get('OPENERP_SERVER')
+            or next((p for p in ('/etc/odoo.conf', '/etc/odoo/odoo.conf',
+                                 '/opt/odoo/odoo.conf', '/etc/openerp-server.conf')
+                     if os.path.exists(p)), None))
+if _ODOO_RC and os.path.exists(_ODOO_RC):
+    config.parse_config(['-c', _ODOO_RC])
+else:
+    # No config file found — fall back to explicit env vars (legacy behaviour).
+    config['db_host'] = os.environ.get('ODOO_DB_HOST') or os.environ.get('HOST') or 'localhost'
+    config['db_port'] = int(os.environ.get('ODOO_DB_PORT') or 5432)
+    config['db_user'] = os.environ.get('ODOO_DB_USER') or os.environ.get('USER') or 'odoo'
+    config['db_password'] = os.environ.get('ODOO_DB_PASSWORD') or os.environ.get('PASSWORD') or 'odoo'
+
+# Database name: explicit env wins, else whatever the config file selects.
+ODOO_DB = os.environ.get('ODOO_DB') or config.get('db_name') or 'odoo'
 config['db_name'] = ODOO_DB
-config['db_host'] = os.environ.get('ODOO_DB_HOST') or os.environ.get('HOST') or 'localhost'
-config['db_port'] = int(os.environ.get('ODOO_DB_PORT') or 5432)
-config['db_user'] = os.environ.get('ODOO_DB_USER') or os.environ.get('USER') or 'odoo'
-config['db_password'] = os.environ.get('ODOO_DB_PASSWORD') or os.environ.get('PASSWORD') or 'odoo'
 if os.environ.get('ODOO_ADDONS_PATH'):
     config['addons_path'] = os.environ['ODOO_ADDONS_PATH']
 
@@ -79,8 +94,15 @@ def _verify_and_load(host_id, token):
     now = int(time.time())
     if exp_i < now:
         return None, 'token expired %ss ago (clock skew between Odoo and bridge?)' % (now - exp_i)
-    reg = Registry(ODOO_DB)
-    with reg.cursor() as cr:
+    # Opening the registry hits PostgreSQL; surface connection problems as a
+    # clean reason instead of letting the handler die with a 1011 internal error.
+    try:
+        reg = Registry(ODOO_DB)
+        cr_ctx = reg.cursor()
+    except Exception as exc:
+        return None, ('cannot reach Odoo database %r — check the bridge DB '
+                      'config / ODOO_RC (%s)' % (ODOO_DB, exc))
+    with cr_ctx as cr:
         env = api.Environment(cr, SUPERUSER_ID, {})
         secret = env['ir.config_parameter'].sudo().get_param('database.secret')
         if not secret:
@@ -143,7 +165,11 @@ async def handler(websocket, path=None):
     token = parse_qs(parsed.query).get('token', [''])[0]
 
     loop = asyncio.get_event_loop()
-    info, reason = await loop.run_in_executor(None, _verify_and_load, host_id, token)
+    try:
+        info, reason = await loop.run_in_executor(None, _verify_and_load, host_id, token)
+    except Exception as exc:  # never let the handler die with a bare 1011
+        _log.exception('verify failed for host %s', host_id)
+        info, reason = None, 'internal error verifying token: %s' % exc
     if not info:
         _log.warning('terminal rejected for host %s: %s', host_id, reason)
         await websocket.send('\r\n\x1b[31mTerminal authorization failed: %s\x1b[0m\r\n' % reason)
