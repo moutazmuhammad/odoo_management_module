@@ -48,6 +48,12 @@ key must be installed on every managed server.
 - An SSH login user (e.g. `deploy`) that has **passwordless sudo**
   (`NOPASSWD`) — required for service control, reading root‑owned conf/addons,
   and root‑owned log files.
+- The **`acl`** package (`apt-get install -y acl`) — Ansible needs `setfacl` when
+  a task drops to the Odoo OS user (pull/upgrade/conf). Without it newer Ansible
+  fails with *"Failed to set permissions on the temporary files … chmod: invalid
+  mode 'A+user:…:rx:allow'"*. (The module also sets a world‑readable‑temp
+  fallback so actions still run if `acl` is missing, but installing it is
+  cleaner/more private.)
 - For backups: `s3cmd` installed and configured (see §8).
 
 ---

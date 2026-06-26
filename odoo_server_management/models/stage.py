@@ -508,6 +508,13 @@ class Stage(models.Model):
                 env.update({
                     'ANSIBLE_HOST_KEY_CHECKING': 'True',
                     'ANSIBLE_SSH_ARGS': f'-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={kh}',
+                    # When a task drops to an unprivileged user (become_user: odoo)
+                    # Ansible needs setfacl (acl pkg) on the target to share its temp
+                    # files; without it newer Ansible hard-fails with a bogus chmod
+                    # ACL mode. This fallback makes the temp files world-readable
+                    # instead, so actions work even where 'acl' isn't installed.
+                    # (Install 'acl' on the servers for the more private ACL path.)
+                    'ANSIBLE_SHELL_ALLOW_WORLD_READABLE_TEMP': 'True',
                 })
 
                 result = subprocess.run(
