@@ -4,7 +4,9 @@
       <t t-set="title">Server Terminal</t>
       <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"/>
       <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-      <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+      <!-- fit addon must match xterm 5.3 (old namespace); the @xterm/addon-fit
+           0.10 build targets xterm 5.5+ and breaks fit() against 5.3. -->
+      <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
       <style>
         <![CDATA[
         #t-root{position:fixed;inset:0;display:flex;flex-direction:column;background:#0d1117;z-index:6;}
@@ -43,10 +45,14 @@
             fontFamily: '"JetBrains Mono", Menlo, Consolas, monospace',
             theme: { background: "#0d1117", foreground: "#c9d1d9", cursor: "#58a6ff" },
           });
-          const fit = new FitAddon.FitAddon();
-          term.loadAddon(fit);
+          let fit = null;
+          try {
+            fit = new FitAddon.FitAddon();
+            term.loadAddon(fit);
+          } catch (e) { fit = null; }
           term.open(document.getElementById("term"));
-          fit.fit();
+          function doFit() { try { if (fit) fit.fit(); } catch (e) {} }
+          doFit();
 
           let ws;
           function connect() {
@@ -64,7 +70,7 @@
             if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
           }
           term.onData(function (d) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: "i", d: d })); });
-          window.addEventListener("resize", function () { fit.fit(); sendResize(); });
+          window.addEventListener("resize", function () { doFit(); sendResize(); });
 
           connect();
         })();

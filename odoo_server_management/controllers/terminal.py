@@ -7,7 +7,7 @@ from odoo.http import request
 from odoo.exceptions import AccessError
 
 GROUP_ADMIN = 'odoo_server_management.group_admin'
-TOKEN_TTL = 60  # seconds — just long enough to open the socket
+TOKEN_TTL = 300  # seconds — headroom for page load + minor clock skew
 
 
 def _sign(secret, msg):

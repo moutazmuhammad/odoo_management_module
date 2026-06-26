@@ -17,6 +17,7 @@ import os
 import json
 import time
 import hmac
+import logging
 import hashlib
 import asyncio
 
@@ -25,10 +26,22 @@ import paramiko
 
 from urllib.parse import urlparse, parse_qs
 
+# Log to stderr so `journalctl -u odoo-terminal` shows the precise reason a
+# session was rejected — token vs. SSH failures used to be indistinguishable.
+logging.basicConfig(
+    level=logging.INFO,
+    format='[term-ws] %(asctime)s %(levelname)s %(message)s',
+)
+_log = logging.getLogger('terminal_ws')
+
 WS_PORT = int(os.environ.get('TERM_WS_PORT', 8770))
 WS_BIND = os.environ.get('TERM_WS_BIND', '127.0.0.1')
 ODOO_DB = os.environ.get('ODOO_DB', 'odoo')
 GROUP_ADMIN = 'odoo_server_management.group_admin'
+# Optional overrides — let an operator pin the key/user the terminal uses
+# without depending on Odoo's stored config (handy for first-run debugging).
+TERM_SSH_KEY_FILE = os.environ.get('TERM_SSH_KEY_FILE')
+TERM_SSH_USER = os.environ.get('TERM_SSH_USER')
 
 # --- Load Odoo (no odoo-bin needed; works for apt/pip installs too) ----------
 import odoo  # noqa: E402
@@ -47,35 +60,72 @@ from odoo.modules.registry import Registry  # noqa: E402
 
 
 def _verify_and_load(host_id, token):
-    """Validate the token (admin-minted) and return connection info, or None."""
+    """Validate the admin-minted token and load connection info.
+
+    Returns ``(info, None)`` on success or ``(None, reason)`` on failure, where
+    ``reason`` is a short human string that is logged and shown in the terminal
+    so the *actual* cause (expired token, DB/secret mismatch, missing key, …) is
+    visible instead of a generic "Unauthorized"."""
     try:
         sid, uid, exp, sig = token.split('.')
     except (ValueError, AttributeError):
-        return None
-    if int(sid) != int(host_id) or int(exp) < int(time.time()):
-        return None
+        return None, 'malformed token'
+    try:
+        sid_i, uid_i, exp_i = int(sid), int(uid), int(exp)
+    except (TypeError, ValueError):
+        return None, 'non-numeric token fields'
+    if sid_i != int(host_id):
+        return None, 'token host mismatch'
+    now = int(time.time())
+    if exp_i < now:
+        return None, 'token expired %ss ago (clock skew between Odoo and bridge?)' % (now - exp_i)
     reg = Registry(ODOO_DB)
     with reg.cursor() as cr:
         env = api.Environment(cr, SUPERUSER_ID, {})
         secret = env['ir.config_parameter'].sudo().get_param('database.secret')
+        if not secret:
+            return None, 'no database.secret on db %r (wrong ODOO_DB?)' % ODOO_DB
         good = hmac.new(secret.encode(), ('%s.%s.%s' % (sid, uid, exp)).encode(),
                         hashlib.sha256).hexdigest()
         if not hmac.compare_digest(good, sig):
-            return None
-        user = env['res.users'].browse(int(uid))
-        if not user.exists() or not user.has_group(GROUP_ADMIN):
-            return None
+            return None, 'bad signature — bridge db %r differs from the web db' % ODOO_DB
+        user = env['res.users'].browse(uid_i)
+        if not user.exists():
+            return None, 'user %s not found' % uid_i
+        if not user.has_group(GROUP_ADMIN):
+            return None, 'user %s is not a Server-Management Administrator' % uid_i
         host = env['server.host'].browse(int(host_id)).exists()
         if not host:
-            return None
+            return None, 'host %s not found' % host_id
         Stage = env['server.stage']
+        key_file = TERM_SSH_KEY_FILE or Stage._ssh_key_file()
+        if not key_file:
+            return None, ('no SSH key configured — set the global key in '
+                          'Server Management → SSH (or TERM_SSH_KEY_FILE)')
+        if not os.path.exists(key_file):
+            return None, 'SSH key file %r does not exist on the bridge host' % key_file
         return {
             'ip': host.ip,
             'port': host.ssh_port or 22,
-            'user': Stage._default_ssh_user(),
-            'key_file': Stage._ssh_key_file(),
+            'user': TERM_SSH_USER or Stage._default_ssh_user(),
+            'key_file': key_file,
             'known_hosts': Stage._known_hosts_file(),
-        }
+        }, None
+
+
+def _load_key(path):
+    """Load a private key file, trying each algorithm. paramiko's implicit
+    auto-detection inside connect() swallows the real reason a key won't load;
+    doing it explicitly lets us report it. Returns (pkey, None) or (None, err)."""
+    last = None
+    for key_cls in (paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.RSAKey):
+        try:
+            return key_cls.from_private_key_file(path), None
+        except paramiko.PasswordRequiredException as exc:
+            return None, 'key is passphrase-protected (%s)' % exc
+        except Exception as exc:  # noqa: BLE001 — wrong algo, try the next class
+            last = exc
+    return None, last
 
 
 async def handler(websocket, path=None):
@@ -93,9 +143,10 @@ async def handler(websocket, path=None):
     token = parse_qs(parsed.query).get('token', [''])[0]
 
     loop = asyncio.get_event_loop()
-    info = await loop.run_in_executor(None, _verify_and_load, host_id, token)
+    info, reason = await loop.run_in_executor(None, _verify_and_load, host_id, token)
     if not info:
-        await websocket.send('\r\n\x1b[31mUnauthorized or expired terminal token.\x1b[0m\r\n')
+        _log.warning('terminal rejected for host %s: %s', host_id, reason)
+        await websocket.send('\r\n\x1b[31mTerminal authorization failed: %s\x1b[0m\r\n' % reason)
         await websocket.close()
         return
 
@@ -111,14 +162,32 @@ async def handler(websocket, path=None):
     chan = None
     t1 = t2 = None
     try:
+        # Load the key ourselves so a bad/locked key gives a precise error
+        # rather than a generic "Authentication failed". Fall back to letting
+        # paramiko search (agent / key_filename) only if explicit load fails.
+        pkey, key_err = _load_key(info['key_file'])
+        if pkey is None:
+            _log.error('could not load SSH key %s: %s', info['key_file'], key_err)
+        connect_kwargs = dict(
+            hostname=info['ip'], port=info['port'], username=info['user'],
+            timeout=15, banner_timeout=15, auth_timeout=15)
+        if pkey is not None:
+            connect_kwargs.update(pkey=pkey, look_for_keys=False, allow_agent=False)
+        else:
+            connect_kwargs.update(key_filename=info['key_file'],
+                                  look_for_keys=True, allow_agent=True)
         try:
-            await loop.run_in_executor(None, lambda: ssh.connect(
-                hostname=info['ip'], port=info['port'], username=info['user'],
-                key_filename=info['key_file'], look_for_keys=True, allow_agent=True,
-                timeout=15))
+            await loop.run_in_executor(None, lambda: ssh.connect(**connect_kwargs))
         except Exception as exc:
-            await websocket.send('\r\n\x1b[31mSSH connection failed: %s\x1b[0m\r\n' % exc)
+            _log.error('SSH connect to %s@%s:%s failed: %s: %s',
+                       info['user'], info['ip'], info['port'],
+                       type(exc).__name__, exc)
+            await websocket.send(
+                '\r\n\x1b[31mSSH connection failed (%s@%s:%s): %s\x1b[0m\r\n'
+                % (info['user'], info['ip'], info['port'], exc))
             return
+        _log.info('terminal opened: %s@%s:%s (host %s)',
+                  info['user'], info['ip'], info['port'], host_id)
         try:
             ssh.save_host_keys(info['known_hosts'])
         except Exception:
