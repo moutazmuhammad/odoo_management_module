@@ -112,14 +112,17 @@ class ServerBackupDatabaseWizard(models.TransientModel):
             download_url = project._presign_get(key)
         except Exception:  # noqa: BLE001
             download_url = ''
+        # Open the signed download link directly so it isn't lost to an
+        # auto-dismissing toast; otherwise just confirm (non-sticky).
+        if download_url:
+            return {'type': 'ir.actions.act_url', 'url': download_url, 'target': 'new'}
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': _('Database Backup URL'),
-                'message': (_('✅ %s') % download_url) if download_url
-                           else _('✅ Backup uploaded to %s.') % project.bucket,
+                'title': _('Database Backup'),
+                'message': _('✅ Backup uploaded to %s.') % project.bucket,
                 'type': 'success',
-                'sticky': True,
+                'sticky': False,
             },
         }

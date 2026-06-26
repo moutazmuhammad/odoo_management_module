@@ -733,12 +733,10 @@ class Stage(models.Model):
     # Utils
     # ===========================
     def _notify(self, message):
-        """Show a sticky success notification, then soft-reload the view.
-
-        `sticky=True` keeps the confirmation visible (a full page reload would
-        otherwise wipe it, making a successful action look like it 'just
-        reloaded the page'). `soft_reload` refreshes the current view/status
-        without a disruptive browser reload."""
+        """Show a success notification that auto-dismisses (no X needed), then
+        soft-reload the view. `sticky=False` lets it fade like Odoo's own toasts;
+        `soft_reload` refreshes the current view/status without a full browser
+        reload."""
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
@@ -746,7 +744,7 @@ class Stage(models.Model):
                 'type': 'success',
                 'title': _('Success'),
                 'message': message,
-                'sticky': True,
+                'sticky': False,
                 'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
             },
         }
