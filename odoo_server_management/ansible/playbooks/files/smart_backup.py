@@ -132,11 +132,16 @@ def find_filestore(db):
 
 
 def domain_for(db):
+    """Domain segment for the object key, from the DB's web.base.url. Returns ''
+    for unconfigured/placeholder hosts (localhost/127.0.0.1/…) so the caller
+    falls back to the server IP instead of a meaningless 'localhost' folder."""
     val = psql_scalar(db, "SELECT value FROM ir_config_parameter WHERE key='web.base.url'")
     host = ''
     if val:
         m = re.match(r'^\s*https?://([^/:]+)', val.strip())
-        host = m.group(1) if m else val.strip().split('/')[0]
+        host = (m.group(1) if m else val.strip().split('/')[0]).strip().lower()
+    if host in ('', 'localhost', '127.0.0.1', '0.0.0.0', '::1', 'localhost.localdomain'):
+        return ''
     if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):
         host = host.replace('.', '-')
     return host
