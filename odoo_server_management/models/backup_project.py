@@ -201,17 +201,36 @@ class BackupProject(models.Model):
     # Actions
     # ------------------------------------------------------------------
     def action_test_storage(self):
-        """Verify credentials + bucket access by listing one object."""
+        """Verify credentials + bucket + region by HEAD-ing the bucket."""
         self.env['server.stage']._check_access(GROUP_ADMIN)
         self.ensure_one()
+        bucket = (self.bucket or '').strip()
         try:
-            self._boto_client().list_objects_v2(Bucket=self.bucket, MaxKeys=1)
+            self._boto_client().head_bucket(Bucket=bucket)
         except UserError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise UserError(_("❌ Storage check failed: %s") % exc)
+            resp = getattr(exc, 'response', None) or {}
+            err = resp.get('Error') or {}
+            meta = resp.get('ResponseMetadata') or {}
+            code = err.get('Code')
+            status = meta.get('HTTPStatusCode')
+            region_hdr = (meta.get('HTTPHeaders') or {}).get('x-amz-bucket-region')
+            if region_hdr and region_hdr != (self.region or '').strip():
+                hint = _(" — the bucket is in region '%s', not '%s'. Set Region to "
+                         "'%s'.") % (region_hdr, self.region, region_hdr)
+            elif code in ('404', 'NoSuchBucket', 'NoSuchKey') or status == 404:
+                hint = _(" — bucket '%s' was not found at %s. Check the exact "
+                         "bucket/Space name and the Region.") % (bucket, self._endpoint_url())
+            elif code in ('403', 'AccessDenied', 'SignatureDoesNotMatch',
+                          'InvalidAccessKeyId') or status in (401, 403):
+                hint = _(" — credentials rejected. Re-enter the access/secret key.")
+            else:
+                hint = ''
+            raise UserError(_("❌ Storage check failed [%s]: %s%s")
+                            % (code or status or 'error', exc, hint))
         return self.env['server.stage']._notify(
-            _("✅ Connected to bucket '%s' (%s).") % (self.bucket, self.region))
+            _("✅ Connected to bucket '%s' (%s).") % (bucket, self.region))
 
     def action_run_now(self):
         """Run the daily backup immediately for all servers in this project."""
