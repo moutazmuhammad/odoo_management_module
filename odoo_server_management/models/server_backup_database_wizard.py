@@ -68,74 +68,58 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         self._check_db_name()
         self.ensure_one()
         stage = self.stage_id.sudo()
+        host = stage.host_id
+        project = host.backup_project_id
+        if not project:
+            raise UserError(_(
+                "This server has no Backup Project assigned. Assign one in "
+                "Server Management → Servers → Backups — it provides the bucket "
+                "and credentials."))
 
+        # Build the object key. Manual backups go under a separate 'manual/' area
+        # so the daily-retention prune (which only touches '<server>/') never
+        # deletes them.
+        server_slug = self.env['server.host']._slug(host.name)
+        seg = (host.ip or '').replace('.', '-')
+        ts = fields.Datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        ext = 'dump' if self.backup_format == 'dump' else 'zip'
+        key = project._object_key(
+            ['manual', server_slug, seg, self.db_name, '%s.%s' % (ts, ext)])
+        try:
+            put_url = project._presign_put(key, ttl=3 * 3600)
+        except UserError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise UserError(_("Could not reach object storage for project '%s': %s")
+                            % (project.name, exc))
+
+        # Dump on the server and upload straight to the bucket via the pre-signed
+        # URL — no object-storage credentials touch the managed server.
         inventory = stage._build_inventory()
-        playbook = os.path.join(os.path.dirname(__file__), '../ansible/playbooks/backup_database.yml')
-
-        IrConfig = self.env['ir.config_parameter'].sudo()
+        playbook = os.path.join(os.path.dirname(__file__),
+                                '../ansible/playbooks/backup_database.yml')
         result = stage._run_ansible_playbook(playbook, inventory, {
             'admin_password': stage.admin_password,
             'url': self._detect_protocol(stage.name),
             'database_name': self.db_name,
             'backup_format': self.backup_format or 'zip',
-            'backup_bucket': IrConfig.get_param('server.backup.bucket', default='odex-backups'),
-            'backup_region': IrConfig.get_param('server.backup.region', default='nyc3'),
-            'backup_prefix': IrConfig.get_param('server.backup.prefix', default='REAL-TIME'),
-            'backup_retention_days': self._int_param('server.backup.retention_days', 1),
-            'backup_signed_url_ttl': self._int_param('server.backup.signed_url_ttl', 3600),
-        })
-
+            'presigned_url': put_url,
+        }, timeout=3 * 3600)
         if not result['success']:
             raise UserError(_('❌ Failed to backup: %s') % result['output'])
 
         try:
-            data = None
-
-            # Try to parse structured YAML/JSON directly
-            try:
-                parsed = yaml.safe_load(result['output'])
-                if isinstance(parsed, dict) and "msg" in parsed:
-                    if isinstance(parsed["msg"], dict):
-                        data = parsed["msg"]  # already JSON object
-                    elif isinstance(parsed["msg"], str):
-                        # Extract JSON substring inside string
-                        json_match = re.search(r'(\{.*\})', parsed["msg"], re.DOTALL)
-                        if json_match:
-                            data = json.loads(json_match.group(1))
-            except Exception:
-                pass  # fallback to regex below
-
-            # Fallback: regex search directly in output
-            if not data:
-                match = re.search(r'"msg":\s*(\{.*?\})', result['output'], re.DOTALL)
-                if match:
-                    data = json.loads(match.group(1))
-
-            if not data:
-                raise UserError(_('Could not find "msg" in response: %s') % result['output'])
-
-            # ✅ Handle success case
-            if data.get("status") == "success":
-                # This is a short-lived signed URL; do NOT follow redirects, as
-                # that would drop the signature query string.
-                final_url = data.get("download_url")
-
-                return {
-                    'type': 'ir.actions.client',
-                    'tag': 'display_notification',
-                    'params': {
-                        'title': _('Database Backup URL'),
-                        'message': _('✅ %s') % final_url,
-                        'type': 'success',
-                        'sticky': True
-                    }
-                }
-            else:
-                raise UserError(_('Backup failed: %s') % result['output'])
-
-        except UserError:
-            raise  # our own deliberate messages must not be mislabeled below
-        except json.JSONDecodeError as e:
-            raise UserError(_('Invalid JSON format: %s') % str(e))
-        except Exception as e:
-            raise UserError(_('Error parsing backup response: %s') % str(e))
+            download_url = project._presign_get(key)
+        except Exception:  # noqa: BLE001
+            download_url = ''
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Database Backup URL'),
+                'message': (_('✅ %s') % download_url) if download_url
+                           else _('✅ Backup uploaded to %s.') % project.bucket,
+                'type': 'success',
+                'sticky': True,
+            },
+        }

@@ -35,6 +35,10 @@ class BackupProject(models.Model):
         string='Retention (days)', default=7,
         help="Daily objects older than this are pruned after each run.")
     daily_backup_enabled = fields.Boolean(string='Daily Backups Enabled', default=True)
+    signed_url_ttl = fields.Integer(
+        string='Signed URL TTL (seconds)', default=3600,
+        help="Lifetime of the download link returned by the real-time backup "
+             "button for objects in this project's bucket.")
 
     # Encrypted-at-rest, write-only credentials (mirrors the settings/token
     # pattern): the plaintext is never echoed back to the form — blank on read,
@@ -134,6 +138,12 @@ class BackupProject(models.Model):
         return self._boto_client().generate_presigned_url(
             'put_object', Params={'Bucket': self.bucket, 'Key': object_key},
             ExpiresIn=ttl)
+
+    def _presign_get(self, object_key, ttl=None):
+        """Return a short-lived pre-signed HTTP GET (download) URL."""
+        return self._boto_client().generate_presigned_url(
+            'get_object', Params={'Bucket': self.bucket, 'Key': object_key},
+            ExpiresIn=ttl or self.signed_url_ttl or 3600)
 
     # --- Multipart upload (large objects; pre-signed, no creds on server) -----
     def _create_multipart(self, object_key):

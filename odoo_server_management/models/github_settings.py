@@ -42,23 +42,9 @@ class GithubSettings(models.TransientModel):
              "Odoo host. If set, it takes precedence over the pasted key.",
     )
 
-    # Object-storage target for database backups (M2/M3). No infra is hardcoded
-    # in the playbook anymore; backups are uploaded privately and downloaded via
-    # a short-lived signed URL.
-    backup_bucket = fields.Char(string="Backup Bucket", default="odex-backups")
-    backup_region = fields.Char(string="Backup Region", default="nyc3")
-    backup_prefix = fields.Char(
-        string="Backup Prefix", default="REAL-TIME",
-        help="Folder/key prefix inside the bucket where dumps are stored.",
-    )
-    backup_retention_days = fields.Integer(
-        string="Backup Retention (days)", default=1,
-        help="Backups older than this many days are pruned on each run.",
-    )
-    backup_signed_url_ttl = fields.Integer(
-        string="Signed URL TTL (seconds)", default=3600,
-        help="Lifetime of the signed download URL returned after a backup.",
-    )
+    # Object-storage targets (bucket, credentials, prefix, retention, signed-URL
+    # TTL) live on each Backup Project now — both the daily job and the real-time
+    # button use the server's assigned project. Only the daily run-hour is global.
     # Hour (server time, 0-23) at which the per-project DAILY backups run. The
     # job ticks hourly and only acts during this hour, so backups stay at night.
     backup_hour = fields.Integer(
@@ -98,11 +84,6 @@ class GithubSettings(models.TransientModel):
             ssh_key_is_set=bool(Stage._get_secret_param('server.ssh.private_key')
                                 or IrConfig.get_param('server.ssh.private_key_file')),
             ssh_private_key_file=IrConfig.get_param('server.ssh.private_key_file', default=''),
-            backup_bucket=IrConfig.get_param('server.backup.bucket', default='odex-backups'),
-            backup_region=IrConfig.get_param('server.backup.region', default='nyc3'),
-            backup_prefix=IrConfig.get_param('server.backup.prefix', default='REAL-TIME'),
-            backup_retention_days=int(IrConfig.get_param('server.backup.retention_days', default='1') or 1),
-            backup_signed_url_ttl=int(IrConfig.get_param('server.backup.signed_url_ttl', default='3600') or 3600),
             backup_hour=int(IrConfig.get_param('server.backup.hour', default='2') or 2),
             auto_stop_days=int(IrConfig.get_param('server.autostop.days', default='7') or 7),
             signup_enabled=(IrConfig.get_param('auth_signup.invitation_scope', default='b2b') == 'b2c'),
@@ -137,11 +118,6 @@ class GithubSettings(models.TransientModel):
         IrConfig.set_param('server.ssh.user', self.ssh_default_user or 'root')
         IrConfig.set_param('server.ssh.port', str(self.ssh_default_port or 22))
         IrConfig.set_param('server.ssh.private_key_file', self.ssh_private_key_file or '')
-        IrConfig.set_param('server.backup.bucket', self.backup_bucket or 'odex-backups')
-        IrConfig.set_param('server.backup.region', self.backup_region or 'nyc3')
-        IrConfig.set_param('server.backup.prefix', self.backup_prefix or 'REAL-TIME')
-        IrConfig.set_param('server.backup.retention_days', str(self.backup_retention_days or 1))
-        IrConfig.set_param('server.backup.signed_url_ttl', str(self.backup_signed_url_ttl or 3600))
         IrConfig.set_param('server.backup.hour',
                            str(self.backup_hour if 0 <= (self.backup_hour or 0) <= 23 else 2))
         IrConfig.set_param('server.autostop.days', str(self.auto_stop_days or 0))

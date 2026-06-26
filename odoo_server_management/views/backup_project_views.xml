@@ -39,6 +39,7 @@
                         <group string="Schedule">
                             <field name="daily_backup_enabled"/>
                             <field name="retention_days"/>
+                            <field name="signed_url_ttl"/>
                         </group>
                         <group string="Servers">
                             <field name="host_count"/>

@@ -32,15 +32,12 @@
                                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...leave empty to keep the current key; paste a new one here to replace it..."/>
                         <field name="ssh_private_key_file" placeholder="(optional) /home/odoo/.ssh/id_ed25519"/>
                     </group>
-                    <group string="Database Backups (private object storage)">
-                        <field name="backup_bucket"/>
-                        <field name="backup_region"/>
-                        <field name="backup_prefix"/>
-                        <field name="backup_retention_days"/>
-                        <field name="backup_signed_url_ttl"/>
-                    </group>
-                    <group string="Daily Backups (per-project, scheduled)">
+                    <group string="Backups (schedule)">
                         <field name="backup_hour"/>
+                        <div colspan="2" class="text-muted">
+                            Buckets and credentials live on each
+                            <b>Backup Project</b>; assign one to each server.
+                        </div>
                     </group>
                     <group string="Auto-Stop Instances">
                         <field name="auto_stop_days"/>
