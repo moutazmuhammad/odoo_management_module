@@ -165,7 +165,8 @@ stored on the managed servers**.
   Odoo DB** (`smart_backup.py`, pushed each run so new services are picked up),
   builds an **Odoo-identical** zip with **`pg_dump` + filestore + manifest.json**
   (restores via Odoo's DB manager), and uploads it. Object key:
-  `<bucket>/<server-slug>/<domain-or-ip>/<db>/<YYYY-MM-DD>.zip`. Objects older than
+  `<server-slug>/<domain-or-ip>/<db>/<YYYY-MM-DD>.zip` (the bucket is the
+  container — its name is NOT part of the object path). Objects older than
   the project retention are pruned.
 - **Large databases:** uploads use **pre-signed URLs** minted by Odoo — a single
   PUT under ~4 GiB, else **multipart** with pre-signed part URLs (512 MiB parts),

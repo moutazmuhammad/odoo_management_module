@@ -72,7 +72,8 @@ No persistent secrets.
   indicator). All services on the host use this project.
 
 ## Object key layout (per your spec)
-`s3://<bucket>/<server-name>/<domain-or-ip>/<database>.zip`
+Object key (inside the bucket — the bucket name is NOT part of the key):
+`<server-name>/<domain-or-ip>/<database>/<YYYY-MM-DD>.zip`
 - `<server-name>`: `server.host.name` slugified — lowercased, runs of
   spaces/symbols → single `-`. "Dev Server" → `dev-server`.
 - `<domain-or-ip>`: the service's domain if it has one (e.g. `exp.odex.sa`),
@@ -80,7 +81,7 @@ No persistent secrets.
   (`151.251.416.152:8069` → `151-251-416-152`).
 - `<database>.zip`: database name + format extension.
 - DECIDED: keep N days of history → final key
-  `<bucket>/<server-slug>/<domain-or-ip>/<database>/<YYYY-MM-DD>.zip`.
+  `<server-slug>/<domain-or-ip>/<database>/<YYYY-MM-DD>.zip` (no bucket folder).
   Project `retention_days` prunes older dated objects (by S3 LastModified).
 - DECIDED: **Design A** (Odoo-orchestrated cron + pre-signed PUT URLs).
 
