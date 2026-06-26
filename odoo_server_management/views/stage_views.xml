@@ -132,9 +132,20 @@
         <field name="arch" type="xml">
             <search>
                 <field name="name"/>
-                <field name="host_id"/>
-                <filter string="Server" name="group_by_host" context="{'group_by': 'host_id'}"/>
-                <filter string="Odoo Version" name="group_by_version" context="{'group_by': 'odoo_version'}"/>
+                <field name="host_id" string="Server"/>
+                <filter string="Running" name="running" domain="[('odoo_status', '=', 'running')]"/>
+                <filter string="Stopped" name="stopped" domain="[('odoo_status', '=', 'stopped')]"/>
+                <separator/>
+                <filter string="Needs Review" name="needs_review" domain="[('needs_review', '=', True)]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Server" name="group_by_host" context="{'group_by': 'host_id'}"/>
+                    <filter string="Odoo Version" name="group_by_version" context="{'group_by': 'odoo_version'}"/>
+                    <filter string="Status" name="group_by_status" context="{'group_by': 'odoo_status'}"/>
+                </group>
+                <!-- Left-hand clickable panel to filter instances by server. -->
+                <searchpanel>
+                    <field name="host_id" string="Server" icon="fa-server" enable_counters="1"/>
+                </searchpanel>
             </search>
         </field>
     </record>
