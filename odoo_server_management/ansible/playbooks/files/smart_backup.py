@@ -160,10 +160,27 @@ def _db_bytes(db):
         return 0
 
 
+def is_running(db):
+    """True if a live Odoo (not our own psql probe) currently holds a connection
+    to `db` — i.e. its service/stage is running. This excludes stopped services
+    and orphan/backup databases. Checked from pg_stat_activity (via the postgres
+    DB, so we don't open a connection to `db` ourselves)."""
+    n = psql_scalar(
+        'postgres',
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = '%s' "
+        "AND application_name <> 'psql'" % db.replace("'", "''"))
+    try:
+        return int(n) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def detect():
     out = []
     for db in list_databases():
         if not is_odoo_db(db):
+            continue
+        if not is_running(db):       # running stages only
             continue
         fs = find_filestore(db)
         out.append({'db': db, 'domain': domain_for(db), 'filestore': fs,

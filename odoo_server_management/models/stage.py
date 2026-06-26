@@ -394,6 +394,15 @@ class Stage(models.Model):
             rec.last_status_check = now
         return self._notify(_('🔄 Status refreshed for %s instance(s).') % len(self))
 
+    @api.model
+    def _cron_refresh_status(self):
+        """Background job: refresh every instance's running/stopped status so the
+        UI stays current without anyone pressing 'Check Status'. Probes run in
+        parallel (see action_check_status)."""
+        stages = self.search([])
+        if stages:
+            stages.action_check_status()
+
     def _build_inventory(self):
         """Inventory for this stage — connection comes entirely from its host."""
         if not self.host_id:

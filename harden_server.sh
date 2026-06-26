@@ -205,12 +205,16 @@ for cf in /etc/crontab /etc/cron.d/* /etc/cron.hourly/* /etc/cron.daily/* \
   echo "  stripped S3 backup cron lines from: $cf"
 done
 
-# 5c. Report (do NOT auto-delete) any other scripts that still embed S3 keys.
+# 5c. Report (do NOT auto-delete) leftover S3 BACKUP scripts/configs. Narrow to a
+#     strong signal (the Spaces endpoint or an s3cmd host_base) in shell/config
+#     files, skipping app code and venvs, so it's fast and not noisy.
 for d in /usr/local/bin /opt /root /home /srv; do
   [ -d "$d" ] || continue
-  grep -rilE 'aws_secret_access_key|secret_key *=|digitaloceanspaces' "$d" \
-      --include='*.sh' --include='*.py' --include='*.cfg' 2>/dev/null | while read -r scr; do
-    echo "  NOTE: $scr still references object-storage keys — review/remove manually"
+  grep -rilE 'digitaloceanspaces\.com|host_base[[:space:]]*=' "$d" \
+      --include='*.sh' --include='*.bash' --include='*.cfg' --include='*.s3cfg' \
+      --exclude-dir=site-packages --exclude-dir=node_modules --exclude-dir=.git \
+      2>/dev/null | while read -r scr; do
+    echo "  NOTE: $scr looks like a leftover S3 backup script/config — review/remove manually"
   done
 done
 
