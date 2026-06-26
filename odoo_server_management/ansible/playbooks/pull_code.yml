@@ -10,24 +10,46 @@
       args:
         executable: /bin/bash
 
-    - name: Git stash and pull with credentials (without saving remote)
+    # Keep the token OFF the command line: a tiny askpass helper reads it from the
+    # environment at run time. Because the secret is no longer in the command, we
+    # can drop no_log and the REAL git error (auth/conflict/divergence) is shown.
+    - name: Create git askpass helper
+      ansible.builtin.copy:
+        dest: "/tmp/.osm_askpass_{{ service_name }}.sh"
+        mode: "0700"
+        content: |
+          #!/bin/sh
+          case "$1" in
+            *[Uu]sername*) printf '%s' "$OSM_GH_USER" ;;
+            *[Pp]assword*) printf '%s' "$OSM_GH_TOKEN" ;;
+          esac
+      become_user: "{{ odoo_user }}"
+
+    - name: Git stash + pull (real errors visible; token via askpass env)
       ansible.builtin.shell: |
-        set -e
-        cd {{ path | quote }}
-        # Stash local changes only if there are any, and remember whether WE
-        # created the stash so we drop ONLY ours — never touch other stashes.
+        cd {{ path | quote }} || exit 9
         STASHED=0
         if git stash push -u -m "odoo-server-mgmt auto-pull" 2>&1 | grep -q "Saved working directory"; then
           STASHED=1
         fi
-        git pull "https://{{ github_user }}:{{ github_token }}@{{ repo_url | regex_replace('^https?://', '') }}" {{ branch_name | quote }}
-        if [ "$STASHED" = "1" ]; then
-          git stash drop
-        fi
+        GIT_ASKPASS="/tmp/.osm_askpass_{{ service_name }}.sh" GIT_TERMINAL_PROMPT=0 \
+          git -c credential.helper= pull --no-rebase --no-edit {{ repo_url | quote }} {{ branch_name | quote }}
+        rc=$?
+        # Always restore our stash handling regardless of the pull result.
+        if [ "$STASHED" = "1" ]; then git stash drop >/dev/null 2>&1 || true; fi
+        exit $rc
+      environment:
+        OSM_GH_USER: "{{ github_user }}"
+        OSM_GH_TOKEN: "{{ github_token }}"
+      become_user: "{{ odoo_user }}"
       args:
         executable: /bin/bash
+
+    - name: Remove git askpass helper
+      ansible.builtin.file:
+        path: "/tmp/.osm_askpass_{{ service_name }}.sh"
+        state: absent
       become_user: "{{ odoo_user }}"
-      no_log: true
 
     - name: Restart Odoo service
       ansible.builtin.systemd:

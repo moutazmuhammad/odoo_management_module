@@ -19,9 +19,11 @@
     backup_format: "{{ backup_format | default('zip') }}"
   tasks:
     - name: Run backup script inline
-      no_log: true
+      # Master password is passed via the environment (not the command), so the
+      # real s3cmd/curl error stays visible instead of being censored.
+      environment:
+        ADMIN_PASSWORD: "{{ admin_password }}"
       shell: |
-        ADMIN_PASSWORD={{ admin_password | quote }}
         URL={{ url | quote }}
         DATABASE_NAME={{ database_name | quote }}
         BUCKET_NAME={{ bucket_name | quote }}
