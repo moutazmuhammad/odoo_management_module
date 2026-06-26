@@ -22,7 +22,7 @@
         ]]>
       </style>
 
-      <div id="t-root" t-att-data-ws="ws_url">
+      <div id="t-root" t-att-data-ws="ws_url" t-att-data-wspath="ws_path">
         <div id="t-bar">
           <span class="dot"></span>
           <span>🖥 Terminal — <span class="host"><t t-esc="ssh_user"/>@<t t-esc="host_name"/></span></span>
@@ -37,7 +37,13 @@
         <![CDATA[
         (function () {
           const root = document.getElementById("t-root");
-          const wsUrl = root.dataset.ws;
+          // Same-origin by default: match the host/scheme the page was loaded
+          // from, so the socket target is always reachable. An explicit
+          // server.terminal.ws_url (data-ws) overrides it.
+          const wsOverride = root.dataset.ws;
+          const wsUrl = (wsOverride && wsOverride.length)
+            ? wsOverride
+            : ((location.protocol === "https:" ? "wss://" : "ws://") + location.host + root.dataset.wspath);
           const statusEl = document.getElementById("t-status");
 
           const term = new Terminal({

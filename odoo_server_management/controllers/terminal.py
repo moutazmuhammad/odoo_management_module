@@ -38,14 +38,19 @@ class ServerTerminalController(http.Controller):
         payload = '%s.%s.%s' % (host_id, request.env.user.id, exp)
         token = '%s.%s' % (payload, _sign(secret, payload))
 
-        # WS endpoint. Default assumes nginx proxies /terminal/ws to the bridge
-        # on the same origin; override with the `server.terminal.ws_url` param
-        # (e.g. ws://host:8770) when not behind a proxy.
-        ws_base = ICP.get_param('server.terminal.ws_url')
-        if not ws_base:
-            base = ICP.get_param('web.base.url') or ''
-            ws_base = base.replace('https://', 'wss://').replace('http://', 'ws://') + '/terminal/ws'
-        ws_url = '%s/%s?token=%s' % (ws_base.rstrip('/'), host_id, token)
+        # WS endpoint. By default the page builds the URL from the browser's own
+        # location (same origin) so it always matches how the admin reached Odoo
+        # — host and http/https — instead of web.base.url, which may be a domain
+        # the browser can't resolve (a real failure we hit: web.base.url pointed
+        # at an unresolvable host, so the socket never opened). nginx proxies
+        # /terminal/ws/ to the bridge on that same origin. Set the
+        # `server.terminal.ws_url` param (e.g. ws://host:8770) only to force a
+        # different origin/port, e.g. when the bridge is not behind the proxy.
+        ws_path = '/terminal/ws/%s?token=%s' % (host_id, token)
+        ws_override = ICP.get_param('server.terminal.ws_url')
+        ws_url = ''
+        if ws_override:
+            ws_url = '%s/%s?token=%s' % (ws_override.rstrip('/'), host_id, token)
 
         Stage = request.env['server.stage']
         return request.render('odoo_server_management.server_terminal_template', {
@@ -54,4 +59,5 @@ class ServerTerminalController(http.Controller):
             'host_ip': host.ip,
             'ssh_user': Stage._default_ssh_user(),
             'ws_url': ws_url,
+            'ws_path': ws_path,
         })
