@@ -1,0 +1,31 @@
+---
+# Phase 2 of the per-project daily backup: given a base64 JSON map of
+# {db: {url, filestore}} pre-signed PUT URLs (minted by Odoo), build an
+# Odoo-identical zip per DB and upload it. No cloud credentials touch the host;
+# the URL map is written 0600, used once, and removed.
+- hosts: all
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Write pre-signed target map
+      no_log: true
+      copy:
+        content: "{{ targets_b64 | b64decode }}"
+        dest: /tmp/.odoo_backup_targets.json
+        mode: '0600'
+
+    - name: Build + upload backups
+      script: files/smart_backup.py backup /tmp/.odoo_backup_targets.json
+      args:
+        executable: python3
+      register: backup_out
+      changed_when: false
+
+    - name: Remove target map
+      file:
+        path: /tmp/.odoo_backup_targets.json
+        state: absent
+
+    - name: Emit result JSON
+      debug:
+        msg: "{{ backup_out.stdout }}"

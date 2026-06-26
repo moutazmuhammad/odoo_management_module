@@ -1,4 +1,5 @@
 from . import stage
+from . import backup_project
 from . import server_host
 from . import stage_branch
 from . import pull_code

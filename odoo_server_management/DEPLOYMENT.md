@@ -151,6 +151,32 @@ both Odoo formats: **Zip** (DB + filestore) and **Dump** (SQL only).
 A background cron (**every 15 minutes**) refreshes each instance's database list
 so the Backup/Upgrade dropdowns open instantly. No setup needed.
 
+### 8a. Per-project DAILY backups (object storage, no creds on servers)
+Separate from the real-time button: a daily job backs up **every database of every
+service** on a server to a **per-project** bucket, with **no S3 credentials ever
+stored on the managed servers**.
+
+- **Backup Projects** (menu: Server Management → Backup Projects, admin-only): one
+  record per DigitalOcean project, each with its own **access key + secret key +
+  bucket + region** (keys encrypted at rest, write-only). Set retention (days).
+- Assign each **Server** a **Backup Project** (server form → Backups). Leave empty
+  to exclude it.
+- A daily `ir.cron` (~02:00) runs per server: it SSHes in, **auto-detects every
+  Odoo DB** (`smart_backup.py`, pushed each run so new services are picked up),
+  builds an **Odoo-identical** zip with **`pg_dump` + filestore + manifest.json**
+  (restores via Odoo's DB manager), and uploads it. Object key:
+  `<bucket>/<server-slug>/<domain-or-ip>/<db>/<YYYY-MM-DD>.zip`. Objects older than
+  the project retention are pruned.
+- **Large databases:** uploads use **pre-signed URLs** minted by Odoo — a single
+  PUT under ~4 GiB, else **multipart** with pre-signed part URLs (512 MiB parts),
+  streamed, so size is effectively unbounded and no key reaches the server.
+- **Requirements:** `pip3 install boto3` on the **Odoo host** (for pre-signing +
+  pruning; soft dependency — only this feature needs it). On each **managed
+  server**: `pg_dump`, `psql`, `curl`, and the SSH user must have passwordless
+  `sudo` (the script dumps via the `postgres` role and reads filestores as root).
+- Use **Run Backup Now** on a project to trigger it immediately, and **Test
+  Storage** to verify the keys/bucket.
+
 ---
 
 ## 9. GitHub credentials (for "Pull Code")

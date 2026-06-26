@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_backup_project_form" model="ir.ui.view">
+        <field name="name">server.backup.project.form</field>
+        <field name="model">server.backup.project</field>
+        <field name="arch" type="xml">
+            <form string="Backup Project">
+                <header>
+                    <button name="action_test_storage" type="object"
+                            string="Test Storage" class="btn-info" icon="fa-plug"
+                            groups="odoo_server_management.group_admin"/>
+                    <button name="action_run_now" type="object"
+                            string="Run Backup Now" class="btn-primary" icon="fa-cloud-upload"
+                            confirm="Back up all databases of every server in this project now?"/>
+                    <field name="keys_set" widget="boolean_toggle" readonly="1"
+                           string="Credentials Set"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <label for="name"/>
+                        <h1><field name="name" placeholder="DigitalOcean Project A"/></h1>
+                    </div>
+                    <group>
+                        <group string="Object Storage">
+                            <field name="bucket" placeholder="my-space"/>
+                            <field name="region" placeholder="nyc3"/>
+                            <field name="endpoint" placeholder="(derived from region)"/>
+                            <field name="prefix" placeholder="(optional)"/>
+                        </group>
+                        <group string="Credentials (write-only)"
+                               groups="odoo_server_management.group_admin">
+                            <field name="access_key" password="True"
+                                   placeholder="leave blank to keep current"/>
+                            <field name="secret_key" password="True"
+                                   placeholder="leave blank to keep current"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Schedule">
+                            <field name="daily_backup_enabled"/>
+                            <field name="retention_days"/>
+                        </group>
+                        <group string="Servers">
+                            <field name="host_count"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Servers">
+                            <field name="host_ids">
+                                <tree create="false">
+                                    <field name="name"/>
+                                    <field name="ip"/>
+                                    <field name="last_backup"/>
+                                </tree>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_backup_project_tree" model="ir.ui.view">
+        <field name="name">server.backup.project.tree</field>
+        <field name="model">server.backup.project</field>
+        <field name="arch" type="xml">
+            <tree string="Backup Projects">
+                <field name="name"/>
+                <field name="bucket"/>
+                <field name="region"/>
+                <field name="host_count"/>
+                <field name="daily_backup_enabled" widget="boolean_toggle"/>
+                <field name="keys_set" widget="boolean_toggle" readonly="1"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="action_backup_project" model="ir.actions.act_window">
+        <field name="name">Backup Projects</field>
+        <field name="res_model">server.backup.project</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <menuitem id="menu_backup_projects" name="Backup Projects"
+              parent="menu_server_management"
+              action="action_backup_project" sequence="40"
+              groups="odoo_server_management.group_admin"/>
+</odoo>

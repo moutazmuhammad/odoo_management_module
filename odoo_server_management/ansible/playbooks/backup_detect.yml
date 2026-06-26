@@ -1,0 +1,18 @@
+---
+# Phase 1 of the per-project daily backup: detect every Odoo database on the
+# host (and its domain + filestore). Logic lives in files/smart_backup.py; runs
+# as root so it can read any filestore and dump any DB (via the postgres role).
+- hosts: all
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Detect Odoo databases
+      script: files/smart_backup.py detect
+      args:
+        executable: python3
+      register: detect_out
+      changed_when: false
+
+    - name: Emit detection JSON
+      debug:
+        msg: "{{ detect_out.stdout }}"

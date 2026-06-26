@@ -15,6 +15,8 @@
     # Live logs stream via Server-Sent Events from the Odoo controller itself
     # (ssh `tail -f`), so no paramiko/websockets and no separate process are
     # needed — just the ssh client and ansible-playbook on the Odoo host.
+    # boto3 is a SOFT dependency (per-project backups only) — imported lazily with
+    # a clear error, so the module still loads on hosts without it.
     'external_dependencies': {
         'python': ['requests', 'yaml', 'cryptography'],
         'bin': ['ansible-playbook', 'ssh'],
@@ -28,6 +30,7 @@
         'views/stage_views.xml',
         'views/pull_code.xml',
         'views/github_settings.xml',
+        'views/backup_project_views.xml',
         'views/pull_code_wizard.xml',
         'views/view_conf_wizard.xml',
         'views/upgrade_module_wizard.xml',

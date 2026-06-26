@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import math
 import base64
 import logging
 
@@ -46,6 +47,14 @@ class ServerHost(models.Model):
 
     key_authorized = fields.Boolean(string='Key Authorized', default=False, readonly=True)
     last_discovery = fields.Datetime(string='Last Discovery', readonly=True)
+    # Object-storage target for this server's daily backups. All services on the
+    # server are backed up to this project's bucket (per-project credentials).
+    backup_project_id = fields.Many2one(
+        'server.backup.project', string='Backup Project', ondelete='set null',
+        help="DigitalOcean project / bucket where this server's daily database "
+             "backups are stored. Leave empty to exclude the server from daily "
+             "backups.")
+    last_backup = fields.Datetime(string='Last Daily Backup', readonly=True)
     stage_ids = fields.One2many('server.stage', 'host_id', string='Detected Instances')
     instance_count = fields.Integer(compute='_compute_instance_count')
 
@@ -84,12 +93,13 @@ class ServerHost(models.Model):
         inv += f"ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={kh}' "
         return inv
 
-    def _run(self, playbook_name, extra_vars=None):
+    def _run(self, playbook_name, extra_vars=None, timeout=None):
         playbook = os.path.join(
             os.path.dirname(__file__), '../ansible/playbooks', playbook_name
         )
         inventory = self._build_inventory()
-        return self.env['server.stage']._run_ansible_playbook(playbook, inventory, extra_vars)
+        return self.env['server.stage']._run_ansible_playbook(
+            playbook, inventory, extra_vars, timeout=timeout)
 
     # ------------------------------------------------------------------
     # Actions
@@ -212,6 +222,141 @@ class ServerHost(models.Model):
         self.stage_ids.action_check_status()
         return self.env['server.stage']._notify(
             _('🔄 Status refreshed for %s instance(s).') % len(self.stage_ids))
+
+    # ------------------------------------------------------------------
+    # Per-project daily backups (object storage, pre-signed uploads)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _slug(text):
+        """Slugify a name for an object key: lowercase, runs of non-alphanumerics
+        collapse to a single dash. "Dev Server" -> "dev-server"."""
+        s = re.sub(r'[^a-z0-9]+', '-', (text or '').strip().lower())
+        return s.strip('-') or 'server'
+
+    def _parse_backup_json(self, output, marker):
+        m = re.search(marker + r'([A-Za-z0-9+/=]+)', output or '')
+        if not m:
+            return None
+        try:
+            return json.loads(base64.b64decode(m.group(1)).decode())
+        except Exception:  # noqa: BLE001
+            _logger.warning("Could not parse %s payload for host %s", marker, self.id)
+            return None
+
+    # Objects under ~5 GB use a single pre-signed PUT; larger ones use multipart
+    # with pre-signed part URLs (512 MiB parts) so any size works, streamed.
+    _BACKUP_SINGLE_LIMIT = 4 * 1024 ** 3
+    _BACKUP_PART_SIZE = 512 * 1024 ** 2
+
+    def _run_daily_backup(self, project=None):
+        """Detect every DB on this host and upload each to the project's bucket
+        (single or multipart, pre-signed — keys never leave Odoo), then prune old
+        objects. Returns the number of databases uploaded successfully."""
+        self.ensure_one()
+        project = project or self.backup_project_id
+        if not project:
+            return 0
+
+        # 1. Detect databases live on the server (picks up new services/DBs).
+        detect = self._run('backup_detect.yml')
+        if not detect.get('success'):
+            _logger.warning("Backup detect failed on host %s: %s",
+                            self.name, (detect.get('output') or '')[:300])
+            return 0
+        items = self._parse_backup_json(detect.get('output'), 'ODOO_BACKUP_DETECT:') or []
+        if not items:
+            _logger.info("No Odoo databases detected on host %s", self.name)
+            return 0
+
+        # 2. Per DB pick single vs multipart by an upper-bound size estimate and
+        #    pre-sign the upload (keys stay in Odoo). Track multipart uploads so
+        #    we can complete/abort them afterwards.
+        server_slug = self._slug(self.name)
+        day = fields.Date.to_string(fields.Date.context_today(self))
+        ip_seg = (self.ip or '').replace('.', '-')
+        targets, multipart = {}, {}
+        for it in items:
+            db = it.get('db')
+            if not db:
+                continue
+            seg = it.get('domain') or ip_seg
+            key = project._object_key([server_slug, seg, db, '%s.zip' % day])
+            size = int(it.get('size') or 0)
+            fs = it.get('filestore') or ''
+            try:
+                if size < self._BACKUP_SINGLE_LIMIT:
+                    targets[db] = {'mode': 'single', 'filestore': fs,
+                                   'url': project._presign_put(key, ttl=12 * 3600)}
+                else:
+                    upload_id = project._create_multipart(key)
+                    nparts = min(10000, math.ceil(size / self._BACKUP_PART_SIZE) + 5)
+                    part_urls = [project._presign_part(key, upload_id, i + 1)
+                                 for i in range(nparts)]
+                    targets[db] = {'mode': 'multipart', 'filestore': fs,
+                                   'upload_id': upload_id,
+                                   'part_size': self._BACKUP_PART_SIZE,
+                                   'part_urls': part_urls}
+                    multipart[db] = {'key': key, 'upload_id': upload_id}
+            except Exception:
+                _logger.exception("Presign/init failed for %s/%s", self.name, db)
+        if not targets:
+            return 0
+
+        # 3. Build + upload on the server (long timeout — large DBs).
+        payload = base64.b64encode(json.dumps(targets).encode()).decode()
+        run = self._run('backup_run.yml', {'targets_b64': payload}, timeout=6 * 3600)
+        results = self._parse_backup_json(run.get('output'), 'ODOO_BACKUP_RESULT:') or {}
+
+        # 4. Finalise: complete multiparts that uploaded; abort the rest.
+        ok = 0
+        for db, res in results.items():
+            mp = multipart.get(db)
+            if isinstance(res, dict) and res.get('ok'):
+                if res.get('mode') == 'multipart' and mp:
+                    try:
+                        project._complete_multipart(mp['key'], mp['upload_id'],
+                                                    res.get('parts') or [])
+                    except Exception:
+                        _logger.exception("Complete multipart failed %s/%s",
+                                          self.name, db)
+                        project._abort_multipart(mp['key'], mp['upload_id'])
+                        continue
+                ok += 1
+            else:
+                if mp:
+                    project._abort_multipart(mp['key'], mp['upload_id'])
+                _logger.warning("Backup failed for %s/%s: %s", self.name, db,
+                                (res or {}).get('error') if isinstance(res, dict) else res)
+        # Abort multiparts whose DB never reported back (e.g. timeout).
+        for db, mp in multipart.items():
+            if db not in results:
+                project._abort_multipart(mp['key'], mp['upload_id'])
+
+        # 5. Prune old objects for this server under the project.
+        try:
+            project._prune(project._object_key([server_slug]) + '/', project.retention_days)
+        except Exception:
+            _logger.exception("Backup prune failed for host %s", self.name)
+
+        self.sudo().last_backup = fields.Datetime.now()
+        _logger.info("Daily backup on host %s: %s/%s databases uploaded to %s",
+                     self.name, ok, len(targets), project.bucket)
+        return ok
+
+    @api.model
+    def _cron_daily_backups(self):
+        """Daily job: back up every server that has a backup project enabled.
+        Commits per host so one failure does not lose the others."""
+        hosts = self.search([('backup_project_id', '!=', False)])
+        for host in hosts:
+            if not host.backup_project_id.daily_backup_enabled:
+                continue
+            try:
+                host._run_daily_backup()
+                self.env.cr.commit()
+            except Exception:
+                self.env.cr.rollback()
+                _logger.exception("Daily backup failed for host %s", host.id)
 
     def action_discover(self):
         """Detect every Odoo service on the host and sync stages."""

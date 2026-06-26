@@ -443,8 +443,12 @@ class Stage(models.Model):
         return [l for l in (self.available_modules or '').splitlines() if l.strip()]
 
     @api.model
-    def _run_ansible_playbook(self, playbook, inventory, extra_vars=None):
-        """Run ansible playbook and log the output (with secrets redacted)."""
+    def _run_ansible_playbook(self, playbook, inventory, extra_vars=None, timeout=None):
+        """Run ansible playbook and log the output (with secrets redacted).
+
+        `timeout` (seconds) overrides the default 20-minute cap — daily backups
+        of large databases need much longer."""
+        timeout = timeout or 1200
         with tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False) as temp_inventory:
             # Restrict perms — inventory may reference key paths / hosts.
             try:
@@ -499,7 +503,7 @@ class Stage(models.Model):
 
                 result = subprocess.run(
                     cmd, capture_output=True, text=True,
-                    check=True, timeout=1200, env=env
+                    check=True, timeout=timeout, env=env
                 )
 
                 stdout, stderr = result.stdout or '', result.stderr or ''
