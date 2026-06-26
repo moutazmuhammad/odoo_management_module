@@ -59,6 +59,14 @@ class GithubSettings(models.TransientModel):
         string="Signed URL TTL (seconds)", default=3600,
         help="Lifetime of the signed download URL returned after a backup.",
     )
+    # Hour (server time, 0-23) at which the per-project DAILY backups run. The
+    # job ticks hourly and only acts during this hour, so backups stay at night.
+    backup_hour = fields.Integer(
+        string="Daily Backup Hour (server time, 0–23)", default=2,
+        help="Per-project daily backups run once at this hour (server/UTC time). "
+             "Pick a night hour for your servers' timezone, e.g. for UTC+3 a "
+             "value of 1 = 4 AM local.",
+    )
 
     # Self-signup: when enabled, anyone with an allowed-domain email can sign up
     # and gets the module's "User" role only.
@@ -95,6 +103,7 @@ class GithubSettings(models.TransientModel):
             backup_prefix=IrConfig.get_param('server.backup.prefix', default='REAL-TIME'),
             backup_retention_days=int(IrConfig.get_param('server.backup.retention_days', default='1') or 1),
             backup_signed_url_ttl=int(IrConfig.get_param('server.backup.signed_url_ttl', default='3600') or 3600),
+            backup_hour=int(IrConfig.get_param('server.backup.hour', default='2') or 2),
             auto_stop_days=int(IrConfig.get_param('server.autostop.days', default='7') or 7),
             signup_enabled=(IrConfig.get_param('auth_signup.invitation_scope', default='b2b') == 'b2c'),
             signup_allowed_domains=IrConfig.get_param('server.signup.allowed_domains', default='exp-sa.com, odex.sa'),
@@ -133,6 +142,8 @@ class GithubSettings(models.TransientModel):
         IrConfig.set_param('server.backup.prefix', self.backup_prefix or 'REAL-TIME')
         IrConfig.set_param('server.backup.retention_days', str(self.backup_retention_days or 1))
         IrConfig.set_param('server.backup.signed_url_ttl', str(self.backup_signed_url_ttl or 3600))
+        IrConfig.set_param('server.backup.hour',
+                           str(self.backup_hour if 0 <= (self.backup_hour or 0) <= 23 else 2))
         IrConfig.set_param('server.autostop.days', str(self.auto_stop_days or 0))
         # Signup: toggle Odoo's free signup + store the allowed-domain list.
         IrConfig.set_param('auth_signup.invitation_scope', 'b2c' if self.signup_enabled else 'b2b')

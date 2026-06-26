@@ -39,6 +39,9 @@
                         <field name="backup_retention_days"/>
                         <field name="backup_signed_url_ttl"/>
                     </group>
+                    <group string="Daily Backups (per-project, scheduled)">
+                        <field name="backup_hour"/>
+                    </group>
                     <group string="Auto-Stop Instances">
                         <field name="auto_stop_days"/>
                         <div colspan="2" class="text-muted" style="font-size:12px;">

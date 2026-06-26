@@ -172,6 +172,48 @@ else
   exit 1
 fi
 
+# ------------------------------------------- 5. Purge S3/Spaces backup creds + crons
+# Daily backups now upload via short-lived pre-signed URLs minted by Odoo, so NO
+# object-storage credentials (s3cmd/aws keys) and NO standalone backup cron jobs
+# should remain on managed servers. Remove them.
+log "5. Removing s3cmd/aws creds and S3 backup cron jobs (now pre-signed, credential-free)"
+
+# 5a. Object-storage credential files for every user (these hold access/secret keys).
+for f in /root/.s3cfg /etc/s3cfg /home/*/.s3cfg \
+         /root/.aws/credentials /home/*/.aws/credentials \
+         /root/.config/s3cmd/config /home/*/.config/s3cmd/config; do
+  [ -f "$f" ] || continue
+  if command -v shred >/dev/null 2>&1; then shred -u "$f" 2>/dev/null || rm -f "$f"; else rm -f "$f"; fi
+  echo "  removed credential file: $f"
+done
+
+# 5b. Backup cron jobs that reference s3cmd/.s3cfg/Spaces — remove the invoked
+#     scripts (when they're clearly S3 backup scripts) and strip the cron lines.
+PAT='s3cmd|\.s3cfg|digitaloceanspaces|aws s3'
+for cf in /etc/crontab /etc/cron.d/* /etc/cron.hourly/* /etc/cron.daily/* \
+          /var/spool/cron/crontabs/* /var/spool/cron/*; do
+  [ -f "$cf" ] || continue
+  grep -qiE "$PAT" "$cf" 2>/dev/null || continue
+  # Remove scripts invoked by the offending lines (only if they look like S3 backups).
+  grep -iE "$PAT" "$cf" | grep -oE '/[A-Za-z0-9_./-]+\.(sh|py|bash)' | sort -u | while read -r scr; do
+    if [ -f "$scr" ] && grep -qiE 's3cmd|secret_key|access_key|digitaloceanspaces' "$scr" 2>/dev/null; then
+      rm -f "$scr" && echo "  removed S3 backup script: $scr"
+    fi
+  done
+  cp -n "$cf" "$cf.bak.harden" 2>/dev/null || true
+  sed -ri "/($PAT)/Id" "$cf"
+  echo "  stripped S3 backup cron lines from: $cf"
+done
+
+# 5c. Report (do NOT auto-delete) any other scripts that still embed S3 keys.
+for d in /usr/local/bin /opt /root /home /srv; do
+  [ -d "$d" ] || continue
+  grep -rilE 'aws_secret_access_key|secret_key *=|digitaloceanspaces' "$d" \
+      --include='*.sh' --include='*.py' --include='*.cfg' 2>/dev/null | while read -r scr; do
+    echo "  NOTE: $scr still references object-storage keys — review/remove manually"
+  done
+done
+
 log "DONE"
 echo "Reconnect with:  ssh -p $SSH_PORT <user>@<server>"
 [ "$KEY_OK" -eq 1 ] && echo "Password login is DISABLED — confirm key login on $SSH_PORT before closing this session." \

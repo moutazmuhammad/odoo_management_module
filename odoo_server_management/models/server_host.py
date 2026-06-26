@@ -345,11 +345,25 @@ class ServerHost(models.Model):
 
     @api.model
     def _cron_daily_backups(self):
-        """Daily job: back up every server that has a backup project enabled.
-        Commits per host so one failure does not lose the others."""
+        """Ticks hourly but only runs during the configured night hour, and at
+        most once per server per day. Commits per host so one failure does not
+        lose the others. (Manual "Run Backup Now" bypasses this guard.)"""
+        ICP = self.env['ir.config_parameter'].sudo()
+        try:
+            hour = int(ICP.get_param('server.backup.hour', default='2'))
+        except (TypeError, ValueError):
+            hour = 2
+        hour = max(0, min(23, hour))
+        now = fields.Datetime.now()      # server time (UTC)
+        if now.hour != hour:
+            return
+        today = now.date()
         hosts = self.search([('backup_project_id', '!=', False)])
         for host in hosts:
             if not host.backup_project_id.daily_backup_enabled:
+                continue
+            # Already backed up today (e.g. a manual run, or a second tick)? Skip.
+            if host.last_backup and host.last_backup.date() == today:
                 continue
             try:
                 host._run_daily_backup()
