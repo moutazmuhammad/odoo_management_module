@@ -178,6 +178,44 @@ class BackupProject(models.Model):
         except Exception:  # noqa: BLE001
             _logger.exception("Abort multipart failed for %s", object_key)
 
+    def _purge_prefix(self, key_prefix):
+        """Delete ALL objects under `key_prefix` (regardless of age). Returns the
+        number deleted."""
+        self.ensure_one()
+        cli = self._boto_client()
+        deleted, token = 0, None
+        while True:
+            kw = {'Bucket': self.bucket, 'Prefix': key_prefix}
+            if token:
+                kw['ContinuationToken'] = token
+            resp = cli.list_objects_v2(**kw)
+            objs = [{'Key': o['Key']} for o in resp.get('Contents', [])]
+            if objs:
+                cli.delete_objects(Bucket=self.bucket, Delete={'Objects': objs})
+                deleted += len(objs)
+            if resp.get('IsTruncated'):
+                token = resp.get('NextContinuationToken')
+            else:
+                break
+        return deleted
+
+    @api.model
+    def _cron_purge_manual(self):
+        """Daily (03:00): empty the 'manual/' area of every project, so manual
+        on-demand backups never accumulate. Commits per project."""
+        for project in self.search([]):
+            if not project.keys_set:
+                continue
+            try:
+                n = project._purge_prefix(project._object_key(['manual']) + '/')
+                if n:
+                    _logger.info("Purged %s manual backup object(s) from %s",
+                                 n, project.bucket)
+                self.env.cr.commit()
+            except Exception:  # noqa: BLE001
+                self.env.cr.rollback()
+                _logger.exception("Manual-backup purge failed for project %s", project.id)
+
     def _prune(self, key_prefix, retention_days):
         """Delete objects under `key_prefix` older than `retention_days`."""
         self.ensure_one()

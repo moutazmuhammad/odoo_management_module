@@ -76,15 +76,16 @@ class ServerBackupDatabaseWizard(models.TransientModel):
                 "Server Management → Servers → Backups — it provides the bucket "
                 "and credentials."))
 
-        # Build the object key. Manual backups go under a separate 'manual/' area
-        # so the daily-retention prune (which only touches '<server>/') never
-        # deletes them.
+        # Manual backups live under a separate 'manual/' area with a FIXED key per
+        # (server, db): each press OVERWRITES the previous one, so there's only
+        # ever a single latest manual backup per database. The whole 'manual/'
+        # area is wiped daily at 03:00 (see _cron_purge_manual). The daily
+        # retention prune only touches '<server>/', so it never affects these.
         server_slug = self.env['server.host']._slug(host.name)
         seg = (host.ip or '').replace('.', '-')
-        ts = fields.Datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         ext = 'dump' if self.backup_format == 'dump' else 'zip'
         key = project._object_key(
-            ['manual', server_slug, seg, self.db_name, '%s.%s' % (ts, ext)])
+            ['manual', server_slug, seg, '%s.%s' % (self.db_name, ext)])
         try:
             put_url = project._presign_put(key, ttl=3 * 3600)
         except UserError:
@@ -108,7 +109,7 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         if not result['success']:
             raise UserError(_('❌ Failed to backup: %s') % result['output'])
 
-        filename = '%s-%s.%s' % (self.db_name, ts, ext)
+        filename = '%s.%s' % (self.db_name, ext)
         try:
             download_url = project._presign_get(key, filename=filename)
         except Exception:  # noqa: BLE001
