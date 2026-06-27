@@ -611,11 +611,13 @@ class Stage(models.Model):
         self._check_access(GROUP_USER)
         self = self.sudo()
         self.ensure_one()
-        base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url')
+        # Relative (same-origin) URL so it works whether Odoo is reached via the
+        # domain or the server IP — web.base.url may point at a host the browser
+        # can't resolve (same issue we fixed for the terminal).
         return {
             'type': 'ir.actions.act_url',
             'target': 'new',
-            'url': f'{base_url}/log/stream/{self.id}',
+            'url': f'/log/stream/{self.id}',
         }
 
     def action_view_conf_file(self):
