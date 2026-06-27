@@ -139,11 +139,15 @@ class BackupProject(models.Model):
             'put_object', Params={'Bucket': self.bucket, 'Key': object_key},
             ExpiresIn=ttl)
 
-    def _presign_get(self, object_key, ttl=None):
-        """Return a short-lived pre-signed HTTP GET (download) URL."""
+    def _presign_get(self, object_key, ttl=None, filename=None):
+        """Return a short-lived pre-signed HTTP GET (download) URL. When
+        `filename` is given, the object is served as an attachment so the browser
+        downloads it (no navigation), which lets us use it without a popup."""
+        params = {'Bucket': self.bucket, 'Key': object_key}
+        if filename:
+            params['ResponseContentDisposition'] = 'attachment; filename="%s"' % filename
         return self._boto_client().generate_presigned_url(
-            'get_object', Params={'Bucket': self.bucket, 'Key': object_key},
-            ExpiresIn=ttl or self.signed_url_ttl or 3600)
+            'get_object', Params=params, ExpiresIn=ttl or self.signed_url_ttl or 3600)
 
     # --- Multipart upload (large objects; pre-signed, no creds on server) -----
     def _create_multipart(self, object_key):

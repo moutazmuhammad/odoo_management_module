@@ -108,14 +108,15 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         if not result['success']:
             raise UserError(_('❌ Failed to backup: %s') % result['output'])
 
+        filename = '%s-%s.%s' % (self.db_name, ts, ext)
         try:
-            download_url = project._presign_get(key)
+            download_url = project._presign_get(key, filename=filename)
         except Exception:  # noqa: BLE001
             download_url = ''
-        # Open the signed download link directly so it isn't lost to an
-        # auto-dismissing toast; otherwise just confirm (non-sticky).
+        # target 'self' + the attachment disposition makes the browser DOWNLOAD
+        # the file automatically — no popup to block, and Odoo stays open.
         if download_url:
-            return {'type': 'ir.actions.act_url', 'url': download_url, 'target': 'new'}
+            return {'type': 'ir.actions.act_url', 'url': download_url, 'target': 'self'}
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
