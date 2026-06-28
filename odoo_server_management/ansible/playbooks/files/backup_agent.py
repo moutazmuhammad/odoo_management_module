@@ -90,6 +90,7 @@ def main():
         db = it['db']
         try:
             req = [{'db': db, 'domain': it.get('domain') or '',
+                    'port': it.get('port') or '',
                     'size': int(it.get('size') or 0)}]
             targets = post(base + '/server_backup/agent/presign',
                            {'token': token, 'dbs': req}, insecure, host_header).get('targets') or {}

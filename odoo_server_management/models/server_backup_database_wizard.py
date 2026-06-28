@@ -82,7 +82,9 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         # daily retention prune only touches '<category>/...', so it never affects
         # these.
         category = host.backup_category or 'odex'
-        seg = host._backup_host_seg(host.ip)
+        # Same instance segment as the daily backup: the stage's name already holds
+        # the nginx domain (or ip:port) resolved at discovery; fall back to host IP.
+        seg = host._backup_host_seg(stage.name) or host._backup_host_seg(host.ip)
         ext = 'dump' if self.backup_format == 'dump' else 'zip'
         key = Storage._object_key(
             ['manual', category, seg, '%s.%s' % (self.db_name, ext)])

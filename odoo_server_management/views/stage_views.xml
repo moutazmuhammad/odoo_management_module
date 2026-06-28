@@ -87,6 +87,7 @@
                                     <field name="log_file_path"/>
                                     <field name="upgrade_module_path"/>
                                     <field name="conf_file"/>
+                                    <field name="nginx_file"/>
                                     <field name="odoo_bin"/>
                                     <field name="python_bin"/>
                                 </group>

@@ -62,10 +62,8 @@ def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
-def _pg_dump_bin(server_major):
-    """Pick a pg_dump whose major >= the SERVER's major (pg_dump refuses to dump
-    from a newer server). Prefers the closest match; falls back to the highest
-    installed (which then errors clearly, prompting a client install)."""
+def _scan_pg_dumps():
+    """All installed pg_dump binaries keyed by major version."""
     bins = {}
     for p in glob.glob('/usr/lib/postgresql/*/bin/pg_dump'):
         m = re.search(r'/postgresql/(\d+)/bin/', p)
@@ -78,13 +76,48 @@ def _pg_dump_bin(server_major):
             bins.setdefault(int(mm.group(1)), 'pg_dump')
     except Exception:
         pass
-    if not bins:
-        return 'pg_dump'
-    majors = sorted(bins)
-    for v in majors:
-        if v >= (server_major or 0):
-            return bins[v]
-    return bins[majors[-1]]
+    return bins
+
+
+def _install_pg_client(major):
+    """Best-effort install of postgresql-client-<major> (PGDG repo) so we can dump a
+    newer server. Needs passwordless sudo + the repo; failures are ignored (the
+    caller then raises a clear error)."""
+    for cmd in (['sudo', '-n', 'apt-get', 'update', '-qq'],
+                ['sudo', '-n', 'apt-get', 'install', '-y', '-qq',
+                 'postgresql-client-%d' % major]):
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except Exception:
+            return
+
+
+def _pg_dump_bin(server_major):
+    """Pick a pg_dump whose major >= the SERVER's (pg_dump refuses to dump from a
+    newer server). If none is installed, try to install the matching client and
+    re-scan; raise a clear, actionable error if it still can't be satisfied
+    (instead of the cryptic 'server version mismatch')."""
+    def _pick(bins):
+        for v in sorted(bins):
+            if v >= (server_major or 0):
+                return bins[v]
+        return None
+
+    bins = _scan_pg_dumps()
+    chosen = _pick(bins)
+    if chosen:
+        return chosen
+    if server_major:  # self-heal: install the matching client, then retry
+        _install_pg_client(server_major)
+        bins = _scan_pg_dumps()
+        chosen = _pick(bins)
+        if chosen:
+            return chosen
+    if bins:
+        raise RuntimeError(
+            "No pg_dump >= server major %s on this host (installed: %s). Install "
+            "'postgresql-client-%s'." % (server_major, sorted(bins), server_major))
+    return 'pg_dump'
 
 
 # ======================================================================
@@ -311,18 +344,82 @@ def is_odoo_db(conn, db):
             "WHERE table_name='ir_module_module' LIMIT 1") == '1'
 
 
-def domain_for(conn, db):
-    val = conn.psql_scalar(
-        db, "SELECT value FROM ir_config_parameter WHERE key='web.base.url'")
-    host = ''
-    if val:
-        m = re.match(r'^\s*https?://([^/:]+)', val.strip())
-        host = (m.group(1) if m else val.strip().split('/')[0]).strip().lower()
-    if host in ('', 'localhost', '127.0.0.1', '0.0.0.0', '::1', 'localhost.localdomain'):
-        return ''
-    if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):
-        host = host.replace('.', '-')
-    return host
+def _nginx_blocks(text, keyword):
+    """Yield the inner text of each top-level `keyword { ... }` block (brace-matched)."""
+    blocks, i = [], 0
+    while True:
+        idx = text.find(keyword, i)
+        if idx == -1:
+            break
+        brace = text.find('{', idx)
+        if brace == -1:
+            break
+        depth, j = 0, brace
+        while j < len(text):
+            if text[j] == '{':
+                depth += 1
+            elif text[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        blocks.append(text[brace + 1:j])
+        i = j + 1
+    return blocks
+
+
+def parse_nginx():
+    """Map a proxied odoo port -> {'domain', 'listen', 'file'} from the nginx site
+    configs. The odoo instance is matched to its nginx vhost BY PORT (nginx
+    proxy_pass port == the instance's http_port). 'domain' is the primary
+    server_name (empty if the vhost has none), 'listen' is the vhost's public
+    listen port, 'file' is the site-config path."""
+    dirs = ['/etc/nginx/sites-enabled', '/etc/nginx/sites-enable', '/etc/nginx/conf.d']
+    texts = {}
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            names = sorted(os.listdir(d))
+        except Exception:
+            continue
+        for fn in names:
+            p = os.path.join(d, fn)
+            try:
+                if os.path.isfile(p):
+                    texts[p] = open(p, errors='ignore').read()
+            except Exception:
+                pass
+    upstreams = {}
+    for text in texts.values():
+        for m in re.finditer(r'upstream\s+(\S+)\s*\{([^}]*)\}', text, re.S):
+            upstreams[m.group(1)] = re.findall(r'server\s+[^;]*?:(\d+)', m.group(2))
+    port_info = {}
+    for path, text in texts.items():
+        for block in _nginx_blocks(text, 'server'):
+            domains = []
+            for sn in re.findall(r'server_name\s+([^;]+);', block):
+                for tok in sn.split():
+                    tok = tok.strip()
+                    if tok and tok not in ('_', 'localhost') and not tok.startswith('$'):
+                        domains.append(tok)
+            primary = domains[0] if domains else ''
+            lm = re.search(r'listen\s+([^;]+);', block)
+            listen = ''
+            if lm:
+                pm = re.search(r'(\d+)\s*$', lm.group(1).split()[0])
+                listen = pm.group(1) if pm else ''
+            ports = re.findall(
+                r'proxy_pass\s+https?://(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|'
+                r'127\.0\.0\.1):(\d+)', block)
+            for up in re.findall(r'proxy_pass\s+https?://([A-Za-z_][\w.-]*)', block):
+                ports.extend(upstreams.get(up, []))
+            for prt in ports:
+                cur = port_info.get(prt)
+                # Prefer a vhost that actually has a domain over a domainless one.
+                if cur is None or (not cur.get('domain') and primary):
+                    port_info[prt] = {'domain': primary, 'listen': listen, 'file': path}
+    return port_info
 
 
 def _data_dir_candidates():
@@ -385,12 +482,20 @@ def _db_bytes(conn, db):
         return 0
 
 
-def _append_db(out, seen, conn, db):
+def _append_db(out, seen, conn, db, nginx=None, http_port=''):
     if not db or db in seen or not is_odoo_db(conn, db):
         return
     seen.add(db)
     fs = find_filestore(db)
-    out.append({'db': db, 'domain': domain_for(conn, db),
+    # The backup path segment comes from the instance's nginx vhost (matched by the
+    # odoo http_port). Domain if the vhost has one; else the public ip:port (the
+    # manager fills the ip) — nginx listen port if known, else the conf http_port.
+    info = ((nginx or {}).get(str(http_port).strip()) if http_port else None) or {}
+    domain = info.get('domain') or ''
+    port = '' if domain else (info.get('listen')
+                              or (str(http_port).strip() if http_port else ''))
+    out.append({'db': db, 'domain': domain, 'port': port,
+                'nginx_file': info.get('file') or '',
                 'filestore': fs, 'size': _db_bytes(conn, db) + _dir_bytes(fs)})
 
 
@@ -400,6 +505,7 @@ def detect_items(force_dbs=()):
     unique match), scoped by db_user ownership the way the Upgrade Module button
     lists databases. `force_dbs` (the host override) are always included by name."""
     out, seen, skipped = [], set(), []
+    nginx = parse_nginx()
     for path in _conf_files():
         cfg = _parse_conf(path)
         if cfg is None:
@@ -411,11 +517,12 @@ def detect_items(force_dbs=()):
             if ambiguous:
                 skipped.append({'conf': path, 'candidates': ambiguous})
             continue
-        _append_db(out, seen, conn, db)
+        http_port = (cfg.get('http_port') or cfg.get('xmlrpc_port') or '').strip()
+        _append_db(out, seen, conn, db, nginx, http_port)
     for db in force_dbs or []:
         db = (db or '').strip()
         if db and db not in seen:
-            _append_db(out, seen, _resolve_conn(db), db)
+            _append_db(out, seen, _resolve_conn(db), db, nginx)
     return out, skipped
 
 

@@ -56,9 +56,9 @@ class BackupAgentController(http.Controller):
             db = (d.get('db') or '').strip()
             if not db or not SAFE.match(db):
                 continue
-            seg = host._backup_host_seg(d.get('domain')) or ip_seg
-            # <category>/<server>/<domain-or-ip>/<db>/<db>_<date>.zip
-            # (db kept verbatim; only the server name is dash-normalized.)
+            # <category>/<server>/<domain-or-ip:port>/<db>/<db>_<date>.zip
+            # segment from the instance's nginx vhost (domain) else host.ip:port.
+            seg = host._instance_seg(d) or ip_seg
             key = Storage._object_key(
                 [category, server_seg, seg, db, '%s_%s.zip' % (db, day)])
             size = int(d.get('size') or 0)

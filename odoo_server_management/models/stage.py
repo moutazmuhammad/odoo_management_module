@@ -126,6 +126,9 @@ class Stage(models.Model):
     # saved and flagged via needs_review; actions validate before use.
     log_file_path = fields.Char(string='Log File Path', groups=GROUP_DEVOPS)
     conf_file = fields.Char(string='Conf File', groups=GROUP_DEVOPS)
+    # The nginx site-config file that fronts this instance (matched to its conf by
+    # port during discovery); blank when the instance has no nginx vhost.
+    nginx_file = fields.Char(string='Nginx File', readonly=True, groups=GROUP_DEVOPS)
     upgrade_module_path = fields.Char(string='Upgrade Module Path', groups=GROUP_DEVOPS)
     http_port = fields.Integer(string='HTTP Port', readonly=True)
     needs_review = fields.Boolean(

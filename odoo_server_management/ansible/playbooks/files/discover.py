@@ -234,48 +234,57 @@ def _extract_blocks(text, keyword):
 
 
 def parse_nginx():
-    """Map proxied Odoo port -> primary domain from nginx config."""
-    port_domain = {}
+    """Map a proxied Odoo port -> {'domain', 'listen', 'file'} from nginx configs.
+
+    The odoo instance is matched to its nginx vhost BY PORT (proxy_pass port ==
+    the instance's http_port). 'file' is the site-config path so discovery can show
+    which nginx file drives each instance."""
     dirs = ['/etc/nginx/sites-enabled', '/etc/nginx/sites-enable', '/etc/nginx/conf.d']
-    text_all = ''
+    texts = {}
     for d in dirs:
         if not os.path.isdir(d):
             continue
         try:
-            names = os.listdir(d)
+            names = sorted(os.listdir(d))
         except Exception:
             continue
-        for fn in sorted(names):
+        for fn in names:
             p = os.path.join(d, fn)
             try:
                 if os.path.isfile(p):
-                    text_all += '\n' + open(p, errors='ignore').read()
+                    texts[p] = open(p, errors='ignore').read()
             except Exception:
                 pass
-    if not text_all.strip():
-        return port_domain
     upstreams = {}
-    for m in re.finditer(r'upstream\s+(\S+)\s*\{([^}]*)\}', text_all, re.S):
-        upstreams[m.group(1)] = re.findall(r'server\s+[^;]*?:(\d+)', m.group(2))
-    for block in _extract_blocks(text_all, 'server'):
-        domains = []
-        for sn in re.findall(r'server_name\s+([^;]+);', block):
-            for tok in sn.split():
-                tok = tok.strip()
-                if tok and tok not in ('_', 'localhost') and not tok.startswith('$'):
-                    domains.append(tok)
-        if not domains:
-            continue
-        primary = domains[0]
-        ports = re.findall(r'proxy_pass\s+https?://(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|127\.0\.0\.1):(\d+)', block)
-        for up in re.findall(r'proxy_pass\s+https?://([A-Za-z_][\w.-]*)', block):
-            ports.extend(upstreams.get(up, []))
-        for prt in ports:
-            port_domain.setdefault(prt, primary)
-    return port_domain
+    for text in texts.values():
+        for m in re.finditer(r'upstream\s+(\S+)\s*\{([^}]*)\}', text, re.S):
+            upstreams[m.group(1)] = re.findall(r'server\s+[^;]*?:(\d+)', m.group(2))
+    port_info = {}
+    for path, text in texts.items():
+        for block in _extract_blocks(text, 'server'):
+            domains = []
+            for sn in re.findall(r'server_name\s+([^;]+);', block):
+                for tok in sn.split():
+                    tok = tok.strip()
+                    if tok and tok not in ('_', 'localhost') and not tok.startswith('$'):
+                        domains.append(tok)
+            primary = domains[0] if domains else ''
+            lm = re.search(r'listen\s+([^;]+);', block)
+            listen = ''
+            if lm:
+                pm = re.search(r'(\d+)\s*$', lm.group(1).split()[0])
+                listen = pm.group(1) if pm else ''
+            ports = re.findall(r'proxy_pass\s+https?://(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|127\.0\.0\.1):(\d+)', block)
+            for up in re.findall(r'proxy_pass\s+https?://([A-Za-z_][\w.-]*)', block):
+                ports.extend(upstreams.get(up, []))
+            for prt in ports:
+                cur = port_info.get(prt)
+                if cur is None or (not cur.get('domain') and primary):
+                    port_info[prt] = {'domain': primary, 'listen': listen, 'file': path}
+    return port_info
 
 
-port_domain = parse_nginx()
+port_info = parse_nginx()
 
 
 def web_base_url_domain(conf):
@@ -385,14 +394,15 @@ def scan_unit(unit):
         if m:
             log_file = m.group(1)
 
-    # Domain for naming: prefer the nginx vhost; fall back to the instance's own
-    # web.base.url so stages show as their domain instead of <ip>:<port>.
-    domain = port_domain.get(str(http_port), '') if http_port else ''
-    if not domain:
-        try:
-            domain = web_base_url_domain(conf)
-        except Exception:
-            domain = ''
+    # Domain + nginx file + public port for this instance — matched to its nginx
+    # vhost BY PORT (proxy_pass port == http_port). The stage name and the backup
+    # path both use this exact source: the nginx domain, else <ip>:<port> where the
+    # port is the nginx listen port (domainless vhost) or the conf http_port. (No
+    # web.base.url fallback — that is not how the agent/backup resolves it.)
+    nginx = (port_info.get(str(http_port)) if http_port else None) or {}
+    domain = nginx.get('domain') or ''
+    nginx_file = nginx.get('file') or ''
+    pub_port = '' if domain else (nginx.get('listen') or str(http_port or ''))
 
     return {
         'service_name': unit[:-len('.service')] if unit.endswith('.service') else unit,
@@ -404,6 +414,8 @@ def scan_unit(unit):
         'log_file': log_file,
         'http_port': http_port,
         'domain': domain,
+        'pub_port': pub_port,
+        'nginx_file': nginx_file,
         'addons_path': addons_path,
         'data_dir': conf_get(conf, 'data_dir') or '',
         'admin_passwd': admin_pw,

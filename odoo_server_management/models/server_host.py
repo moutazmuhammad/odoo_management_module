@@ -327,6 +327,19 @@ class ServerHost(models.Model):
         self.ensure_one()
         return self._backup_norm(self.name) or self._backup_host_seg(self.ip)
 
+    def _instance_seg(self, it):
+        """The per-instance <domain-or-ip:port> path segment for a detected db item
+        (from smart_backup). Uses the nginx domain when present, else this host's IP
+        with the public port (nginx listen port, else the conf http_port). The IP is
+        the manager-known host.ip; ':' becomes '-' (e.g. 46.101.127.229-8069)."""
+        self.ensure_one()
+        dom = (it.get('domain') or '').strip()
+        if dom:
+            return self._backup_host_seg(dom)
+        port = str(it.get('port') or it.get('http_port') or '').strip()
+        base = '%s:%s' % (self.ip, port) if port else (self.ip or '')
+        return self._backup_host_seg(base)
+
     def _run_daily_backup(self, project=None, only_dbs=None):
         """Detect every DB on this host and upload each to the shared Space
         (single or multipart, pre-signed — keys never leave Odoo), then prune old
@@ -406,9 +419,9 @@ class ServerHost(models.Model):
         db = it.get('db')
         if not db:
             return False
-        seg = self._backup_host_seg(it.get('domain')) or ip_seg
-        # <category>/<server>/<domain-or-ip>/<db>/<db>_<date>.zip
-        # (db is kept verbatim — only the server name is dash-normalized.)
+        # <category>/<server>/<domain-or-ip:port>/<db>/<db>_<date>.zip
+        # segment from nginx (domain) else host.ip:port; db kept verbatim.
+        seg = self._instance_seg(it) or ip_seg
         key = Storage._object_key(
             [category, server_seg, seg, db, '%s_%s.zip' % (db, day)])
         size = int(it.get('size') or 0)
@@ -714,13 +727,16 @@ class ServerHost(models.Model):
                 inst.get('conf_file'), inst.get('log_file'),
                 inst.get('odoo_user'), odoo_bin,
             ])
-            # Stage name = domain (from nginx) else ip:port else service name.
-            http_port = str(inst.get('http_port') or '').strip()
+            # Stage name uses the SAME source as the backup path (nginx domain, else
+            # <ip>:<port> where port = nginx listen port (domainless vhost) or the
+            # conf http_port). Only difference vs the bucket path: the name keeps
+            # ip:port while the path uses ip-port.
             domain = (inst.get('domain') or '').strip()
+            pub_port = str(inst.get('pub_port') or inst.get('http_port') or '').strip()
             if domain:
                 stage_name = domain
-            elif http_port:
-                stage_name = f"{self.ip}:{http_port}"
+            elif pub_port:
+                stage_name = f"{self.ip}:{pub_port}"
             else:
                 stage_name = f"{self.name} / {service_name}"
             vals = {
@@ -731,6 +747,7 @@ class ServerHost(models.Model):
                 'odoo_bin': odoo_bin,
                 'python_bin': python_bin,
                 'conf_file': inst.get('conf_file') or '',
+                'nginx_file': inst.get('nginx_file') or '',
                 'log_file_path': inst.get('log_file') or '',
                 'upgrade_module_path': upgrade_path,
                 'odoo_user': inst.get('odoo_user') or '',
