@@ -185,6 +185,25 @@ def find_custom_modules(addons_path, user, core_roots):
     return sorted(mods)
 
 
+def find_core_modules(addons_path, user, core_roots):
+    """List Odoo's bundled (core) modules under the addons path — the inverse of
+    find_custom_modules — so they can be offered for upgrade alongside the custom
+    ones (the user may need to upgrade e.g. `account` or `web` too)."""
+    mods = set()
+    for d in [x.strip() for x in (addons_path or '').split(',') if x.strip()]:
+        is_core = any(d == cr or d.startswith(cr.rstrip('/') + '/') for cr in core_roots)
+        if not is_core and not is_core_addons_dir(d):
+            continue
+        out = run_as(user, "find %s -mindepth 2 -maxdepth 2 "
+                           "\\( -name __manifest__.py -o -name __openerp__.py \\)"
+                     % shlex.quote(d))
+        for line in out.splitlines():
+            line = line.strip()
+            if line:
+                mods.add(os.path.basename(os.path.dirname(line)))
+    return sorted(mods)
+
+
 units = set()
 for line in sh("systemctl list-unit-files --type=service --no-legend --plain").splitlines():
     parts = line.split()
@@ -398,6 +417,7 @@ def scan_unit(unit):
     # targets and used only to mark which addons dirs are "core".
     core_roots = [r['path'] for r in repos if is_official_odoo(r['url'])]
     modules = find_custom_modules(addons_path, odoo_user, core_roots)
+    odoo_modules = find_core_modules(addons_path, odoo_user, core_roots)
     repos = [r for r in repos if not is_official_odoo(r['url'])]
 
     # Log file path: try the conf first, then the systemd unit.
@@ -449,6 +469,7 @@ def scan_unit(unit):
         'admin_passwd': admin_pw,
         'repos': repos,
         'modules': modules,
+        'odoo_modules': odoo_modules,
     }
 
 

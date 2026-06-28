@@ -9,7 +9,10 @@
               <group>
                   <field name="stage_id" invisible="1"/>
                   <field name="database_name"/>
-                  <field name="module_name"/>
+                  <field name="module_pick"
+                         options="{'no_create': True, 'no_open': True}"/>
+                  <field name="module_names"
+                         placeholder="e.g. odex25_account, account, sale"/>
               </group>
               <footer>
                   <button string="Upgrade" type="object" name="action_upgrade" class="btn-primary"/>

@@ -877,6 +877,7 @@ class ServerHost(models.Model):
             if admin_pw:
                 vals['admin_password'] = admin_pw
             vals['available_modules'] = "\n".join(inst.get('modules') or [])
+            vals['available_odoo_modules'] = "\n".join(inst.get('odoo_modules') or [])
             existing = Stage.search([
                 ('host_id', '=', self.id),
                 ('service_name', '=', service_name),

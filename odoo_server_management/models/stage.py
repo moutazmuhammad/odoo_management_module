@@ -195,6 +195,9 @@ class Stage(models.Model):
     # Cached list of the instance's custom modules (newline-separated), detected
     # during discovery — powers the Upgrade wizard's module dropdown.
     available_modules = fields.Text(string="Available Modules", readonly=True, copy=False)
+    # Same, for Odoo's bundled (core) modules — offered alongside the custom ones
+    # in the Upgrade wizard so e.g. `account`/`web` can be upgraded too.
+    available_odoo_modules = fields.Text(string="Available Odoo Modules", readonly=True, copy=False)
 
     # Stored backups for this stage — REAL transient rows (a regular One2many, so
     # the form renders them reliably). They are (re)listed from the object Space on
@@ -675,6 +678,11 @@ class Stage(models.Model):
         self.ensure_one()
         return [l for l in (self.available_modules or '').splitlines() if l.strip()]
 
+    def _cached_odoo_modules(self):
+        """Return this instance's cached Odoo core-module list (from discovery)."""
+        self.ensure_one()
+        return [l for l in (self.available_odoo_modules or '').splitlines() if l.strip()]
+
     @api.model
     def _run_ansible_playbook(self, playbook, inventory, extra_vars=None, timeout=None):
         """Run ansible playbook and log the output (with secrets redacted).
@@ -824,8 +832,9 @@ class Stage(models.Model):
         self.ensure_one()
         dbs = self._cached_databases()
         mods = self._cached_modules()
+        odoo_mods = self._cached_odoo_modules()
         ctx = dict(self.env.context, default_stage_id=self.id,
-                   db_list=dbs, module_list=mods)
+                   db_list=dbs, module_list=mods, odoo_module_list=odoo_mods)
         if dbs:
             ctx['default_database_name'] = dbs[0]
         return {

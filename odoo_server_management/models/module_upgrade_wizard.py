@@ -15,7 +15,18 @@ class UpgradeModuleWizard(models.TransientModel):
 
     stage_id = fields.Many2one('server.stage', string='Stage', required=True)
     database_name = fields.Selection(selection='_sel_databases', string='Database', required=True)
-    module_name = fields.Selection(selection='_sel_modules', string='Module', required=True)
+    # The actual modules to upgrade: one or more technical names, comma/space
+    # separated. Free text, so ANY module can be typed (custom or Odoo core), and
+    # several can be upgraded together (Odoo's `-u` takes a comma-separated list).
+    module_names = fields.Char(
+        string='Modules', required=True,
+        help="Technical name(s) of the module(s) to upgrade, comma-separated. "
+             "Use 'Add from list' to insert a discovered module, or just type any "
+             "name yourself (e.g. account, sale).")
+    # Convenience picker: choosing a module appends it to 'Modules' and resets.
+    # Offers both the instance's custom modules and Odoo's bundled ones.
+    module_pick = fields.Selection(selection='_sel_modules', string='Add from list',
+                                   store=False)
 
     @api.model
     def _sel_databases(self):
@@ -24,14 +35,46 @@ class UpgradeModuleWizard(models.TransientModel):
 
     @api.model
     def _sel_modules(self):
-        # The instance's custom modules, detected during discovery
-        # (module_list in the action context).
-        return [(m, m) for m in (self.env.context.get('module_list') or [])]
+        # Custom modules first, then Odoo core modules — both detected during
+        # discovery (module_list / odoo_module_list in the action context). The
+        # value is the bare technical name; core ones are labelled "(Odoo)".
+        seen, opts = set(), []
+        for m in (self.env.context.get('module_list') or []):
+            if m not in seen:
+                seen.add(m)
+                opts.append((m, m))
+        for m in (self.env.context.get('odoo_module_list') or []):
+            if m not in seen:
+                seen.add(m)
+                opts.append((m, '%s  (Odoo)' % m))
+        return opts
 
-    @api.constrains('database_name', 'module_name')
+    def _module_list(self):
+        """Parse the 'Modules' free-text field into a clean list of names
+        (accepts comma and/or whitespace separators, drops blanks/duplicates)."""
+        self.ensure_one()
+        out = []
+        for tok in (self.module_names or '').replace(',', ' ').split():
+            tok = tok.strip()
+            if tok and tok not in out:
+                out.append(tok)
+        return out
+
+    @api.onchange('module_pick')
+    def _onchange_module_pick(self):
+        # Append the picked module to the free-text field, then clear the picker
+        # so the next pick adds another (lets you build a multi-module list).
+        if self.module_pick:
+            mods = self._module_list()
+            if self.module_pick not in mods:
+                mods.append(self.module_pick)
+            self.module_names = ', '.join(mods)
+            self.module_pick = False
+
+    @api.constrains('database_name', 'module_names')
     def _check_names(self):
         for rec in self:
-            for val in (rec.database_name, rec.module_name):
+            for val in [rec.database_name] + rec._module_list():
                 if val and not SAFE_NAME_RE.match(val.strip()):
                     raise ValidationError(_(
                         "Invalid value '%s'. Only letters, digits, '.', '_' and "
@@ -48,16 +91,22 @@ class UpgradeModuleWizard(models.TransientModel):
                               "configuration file, or Odoo user. Run discovery or "
                               "set them manually."))
 
+        modules = self._module_list()
+        if not modules:
+            raise UserError(_("Enter at least one module to upgrade."))
         # Capture plain values now (the wizard is transient and may be vacuumed before
-        # the background job runs).
-        database_name, module_name = self.database_name, self.module_name
+        # the background job runs). Odoo's `-u` accepts a comma-separated list, so all
+        # requested modules are upgraded in a single run.
+        database_name = self.database_name
+        modules_arg = ','.join(modules)          # passed straight to `-u`
+        modules_label = ', '.join(modules)       # human-readable for toasts/logs
         playbook = os.path.join(os.path.dirname(__file__),
                                 '../ansible/playbooks/upgrade_module.yml')
 
         def work(stg):
             extra_vars = {
                 'database_name': database_name,
-                'module_name': module_name,
+                'module_name': modules_arg,
                 'service_name': stg.service_name,
                 'upgrade_module_path': stg.upgrade_module_path,
                 'conf_file': stg.conf_file,
@@ -70,13 +119,13 @@ class UpgradeModuleWizard(models.TransientModel):
                 # Return the status hint; _run_bg persists it (work must not write
                 # the DB — its phase-1 transaction is rolled back).
                 return {'ok': True, 'service_status': True,
-                        'message': _('✅ Module %s upgraded on %s')
-                        % (module_name, database_name),
+                        'message': _('✅ Module(s) %s upgraded on %s')
+                        % (modules_label, database_name),
                         'detail': result['output']}
             return {'ok': False,
                     'message': _('❌ Upgrade of %s on %s failed — see Last Operation '
-                                 'Details.') % (module_name, database_name),
+                                 'Details.') % (modules_label, database_name),
                     'detail': result['output']}
 
         return stage._run_bg(
-            _('Upgrade module %s (%s)') % (module_name, database_name), work)
+            _('Upgrade module(s) %s (%s)') % (modules_label, database_name), work)
