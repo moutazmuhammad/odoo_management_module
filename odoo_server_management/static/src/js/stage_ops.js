@@ -34,12 +34,12 @@ const serverMgmtOpsService = {
                     a.click();
                     a.remove();
                 }
-                // Status-changing actions (start/stop/restart) ask for a refresh so
-                // the running/stopped badge updates in place — a soft reload of the
-                // current view only, never a full browser page load.
-                if (payload.reload) {
-                    action.doAction({ type: "ir.actions.client", tag: "soft_reload" });
-                }
+                // Every finished action refreshes the current view (a soft reload of
+                // the current view only, never a full browser page load): the
+                // running/stopped badge updates in place AND any action button that
+                // was hidden while op_state == 'running' reappears now that the op is
+                // done — on success or failure alike.
+                action.doAction({ type: "ir.actions.client", tag: "soft_reload" });
             }
         });
     },

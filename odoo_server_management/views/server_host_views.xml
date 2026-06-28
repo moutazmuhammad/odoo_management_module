@@ -13,14 +13,16 @@
                     <button name="action_discover" type="object"
                             string="Discover Instances" class="btn-primary"
                             icon="fa-search"
-                            groups="odoo_server_management.group_operator"/>
+                            groups="odoo_server_management.group_operator"
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
                     <button name="action_open_terminal" type="object"
                             string="Open Terminal" class="btn-dark" icon="fa-terminal"
                             groups="odoo_server_management.group_devops"/>
                     <button name="action_run_backup_now" type="object"
                             string="Run Backup Now" class="btn-secondary" icon="fa-cloud-upload"
                             groups="odoo_server_management.group_devops"
-                            confirm="Build and upload a backup of every database on this server now?"/>
+                            confirm="Build and upload a backup of every database on this server now?"
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
                     <button name="action_deploy_agent" type="object"
                             string="Install Self-Backup Agent" class="btn-secondary" icon="fa-download"
                             groups="odoo_server_management.group_operator"

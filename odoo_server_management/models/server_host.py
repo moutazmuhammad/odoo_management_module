@@ -587,7 +587,7 @@ class ServerHost(models.Model):
 
         import threading
         threading.Thread(target=_worker, name='odoo-host-backup', daemon=True).start()
-        return self.env['server.stage']._op_started_toast(label)
+        return self.env['server.stage']._op_started_toast(label, reload=True)
 
     def _ensure_agent_token(self):
         # Read AND write via sudo: agent_token is an admin-only field, so reading
@@ -807,7 +807,7 @@ class ServerHost(models.Model):
 
         import threading
         threading.Thread(target=_worker, name='odoo-host-discover', daemon=True).start()
-        return self.env['server.stage']._op_started_toast(label)
+        return self.env['server.stage']._op_started_toast(label, reload=True)
 
     # ------------------------------------------------------------------
     # Discovery parsing

@@ -18,12 +18,12 @@
                     <button name="action_backup_database" type="object" string="Backup"
                             class="btn-primary" icon="fa-database"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_upgrade_module" string="Upgrade Module" type="object"
                             class="btn-primary" icon="fa-refresh"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_view_logs_stream" type="object" string="View Logs"
                             class="btn-primary" icon="fa-terminal"
@@ -36,7 +36,7 @@
                     <button name="action_pull_code" type="object" string="Pull Code"
                             class="btn btn-primary" icon="fa-download"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_start_service" type="object" string="Start"
                             class="btn btn-success" icon="fa-play"

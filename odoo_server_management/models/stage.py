@@ -493,12 +493,22 @@ class Stage(models.Model):
     # ===========================
     # Background action runner (non-blocking actions with async result toasts)
     # ===========================
-    def _op_started_toast(self, label):
-        """Immediate, non-reloading toast returned by every background action so the
-        button spinner clears at once AND any open wizard modal closes — `next` runs
-        an act_window_close after the toast, so the user can't re-click and fire the
-        job twice (a no-op for direct form/list buttons that aren't in a dialog). The
-        real result arrives later as a bus toast (see _run_bg)."""
+    def _op_started_toast(self, label, reload=False):
+        """Immediate toast returned by every background action so the button spinner
+        clears at once. The `next` action that runs after the toast hides the trigger
+        so the user can't re-click and fire the job twice:
+
+        - reload=False (wizard buttons): act_window_close — shuts the wizard modal;
+          closing it reloads the parent form, which then reads op_state == 'running'
+          and hides the button (a harmless no-op for non-dialog buttons).
+        - reload=True (direct form buttons, e.g. discover/run-backup-now): soft_reload
+          — refreshes the current view in place so the just-started op_state ==
+          'running' hides the button immediately (there is no wizard to close).
+
+        The real result arrives later as a bus toast that soft-reloads again, so the
+        button reappears when the op finishes (see _run_bg / stage_ops.js)."""
+        nxt = ({'type': 'ir.actions.client', 'tag': 'soft_reload'} if reload
+               else {'type': 'ir.actions.act_window_close'})
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
@@ -508,7 +518,7 @@ class Stage(models.Model):
                 'message': _('⏳ %s started — you will be notified when it finishes.')
                            % label,
                 'sticky': False,
-                'next': {'type': 'ir.actions.act_window_close'},
+                'next': nxt,
             },
         }
 
