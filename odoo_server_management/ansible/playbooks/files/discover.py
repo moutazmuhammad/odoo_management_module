@@ -139,6 +139,32 @@ def find_repos(addons_path, user):
     return list(found.values())
 
 
+def _has_odoo_bin(path):
+    """True if `path` is the root of an Odoo source tree (holds odoo-bin/odoo.py)."""
+    return any(os.path.isfile(os.path.join(path, b))
+               for b in ('odoo-bin', 'odoo.py'))
+
+
+def is_core_addons_dir(d):
+    """True if `d` is one of Odoo's OWN addons dirs (the framework + standard apps
+    that ship with Odoo), so its modules are core — never offered for upgrade.
+
+    Odoo core addons always sit at ``<src>/addons`` or ``<src>/odoo/addons``, right
+    next to the source tree's odoo-bin. Detecting that by structure (rather than by
+    a git remote of github.com/odoo) works even when the Odoo source is a checkout
+    from a fork/mirror or an unpacked tarball with no remote at all, and it catches
+    the common layout where several Odoo source copies appear in one addons_path."""
+    d = d.rstrip('/')
+    if os.path.basename(d) != 'addons':
+        return False
+    parent = os.path.dirname(d)                       # <src>/addons
+    if _has_odoo_bin(parent):
+        return True
+    if os.path.basename(parent) == 'odoo':            # <src>/odoo/addons
+        return _has_odoo_bin(os.path.dirname(parent))
+    return False
+
+
 def find_custom_modules(addons_path, user, core_roots):
     """List the *custom* Odoo modules under the addons path (a module = a dir
     with __manifest__.py / __openerp__.py), excluding anything inside the Odoo
@@ -146,7 +172,9 @@ def find_custom_modules(addons_path, user, core_roots):
     mods = set()
     for d in [x.strip() for x in (addons_path or '').split(',') if x.strip()]:
         if any(d == cr or d.startswith(cr.rstrip('/') + '/') for cr in core_roots):
-            continue  # skip the core odoo/odoo addons dirs
+            continue  # skip core dirs detected via git remote (odoo/odoo, odoo/enterprise)
+        if is_core_addons_dir(d):
+            continue  # skip Odoo's own addons dirs detected by source-tree structure
         out = run_as(user, "find %s -mindepth 2 -maxdepth 2 "
                            "\\( -name __manifest__.py -o -name __openerp__.py \\)"
                      % shlex.quote(d))
