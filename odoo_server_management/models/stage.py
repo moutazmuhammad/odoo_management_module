@@ -477,7 +477,11 @@ class Stage(models.Model):
         stage_id, dbname, uid = self.id, self.env.cr.dbname, self.env.uid
 
         def _worker():
+            import time as _time
             import odoo
+            # Phase 1 — run the side-effecting work (ansible) exactly ONCE. We do not
+            # persist anything here; `work` returns a dict and only the result write
+            # in phase 2 touches the DB (so a retry never re-runs ansible).
             try:
                 with odoo.registry(dbname).cursor() as cr:
                     env = api.Environment(cr, uid, {})
@@ -486,26 +490,52 @@ class Stage(models.Model):
                         return
                     try:
                         res = work(stage.sudo()) or {}
-                        ok = bool(res.get('ok'))
-                        message = res.get('message') or (
-                            _('%s finished.') % label if ok else _('%s failed.') % label)
-                        url = res.get('url') or False
                     except Exception as exc:  # noqa: BLE001 — report, never crash
                         _logger.exception("Background op %r failed for stage %s",
                                           label, stage_id)
-                        ok, url = False, False
-                        message = (str(exc) or repr(exc))[-1500:]
-                    stage.sudo().write({
-                        'op_state': 'done' if ok else 'failed',
-                        'op_time': fields.Datetime.now(),
-                        'op_detail': message})
-                    title = ('✅ %s' % label) if ok else ('❌ %s' % label)
-                    env['server.stage']._send_op_bus(
-                        uid, ok, title, message, sticky=not ok, url=url,
-                        reload=reload and ok)  # refresh the status badge on success
-                    cr.commit()
-            except Exception:  # noqa: BLE001 — a thread must never escape
-                _logger.exception("Background op thread crashed for stage %s", stage_id)
+                        res = {'ok': False, 'message': (str(exc) or repr(exc))[-1500:]}
+                    cr.rollback()  # drop ORM reads; the ansible side effect already ran
+            except Exception as exc:  # noqa: BLE001
+                _logger.exception("Background op %r crashed for stage %s", label, stage_id)
+                res = {'ok': False, 'message': (str(exc) or repr(exc))[-1500:]}
+
+            ok = bool(res.get('ok'))
+            message = res.get('message') or (
+                _('%s finished.') % label if ok else _('%s failed.') % label)
+            url = res.get('url') or False
+            title = ('✅ %s' % label) if ok else ('❌ %s' % label)
+            vals = {'op_state': 'done' if ok else 'failed',
+                    'op_time': fields.Datetime.now(), 'op_detail': message}
+            if ok and res.get('odoo_status'):
+                vals['odoo_status'] = res['odoo_status']
+                vals['service_status'] = bool(res.get('service_status'))
+                vals['last_status_check'] = fields.Datetime.now()
+            elif ok and 'service_status' in res:
+                vals['service_status'] = bool(res['service_status'])
+
+            # Phase 2 — persist the result + push the toast, retrying on a concurrent
+            # update (REPEATABLE READ raises a serialization error when, e.g., the
+            # status cron writes the same row at the same moment). Background threads
+            # don't get Odoo's request-level retry, so we do it ourselves — otherwise
+            # the result write rolls back and the op is stuck on 'running'.
+            for attempt in range(5):
+                try:
+                    with odoo.registry(dbname).cursor() as cr:
+                        env = api.Environment(cr, uid, {})
+                        stage = env['server.stage'].browse(stage_id)
+                        if stage.exists():
+                            stage.sudo().write(vals)
+                        env['server.stage']._send_op_bus(
+                            uid, ok, title, message, sticky=not ok, url=url,
+                            reload=reload and ok)  # one bus row per successful commit
+                        cr.commit()
+                    break
+                except Exception:  # noqa: BLE001 — serialization/lock conflict, retry
+                    _logger.warning("Persist op result for stage %s: attempt %s failed, "
+                                    "retrying", stage_id, attempt + 1)
+                    _time.sleep(0.5 * (attempt + 1))
+            else:
+                _logger.error("Gave up persisting op result for stage %s", stage_id)
 
         import threading
         threading.Thread(target=_worker, name='odoo-stage-op', daemon=True).start()
@@ -804,7 +834,9 @@ class Stage(models.Model):
 
     def _service_action_work(self, playbook_file, ok_status, ok_message):
         """Build a `work` closure (for _run_bg) that runs a service playbook and, on
-        success, writes the resulting service_status/odoo_status."""
+        success, RETURNS the resulting status (the worker persists it in its own
+        retryable transaction — work itself must not write the DB, since _run_bg
+        rolls back phase 1)."""
         playbook = os.path.join(os.path.dirname(__file__),
                                 '../ansible/playbooks/%s' % playbook_file)
 
@@ -813,11 +845,8 @@ class Stage(models.Model):
                 playbook, stage._build_inventory(),
                 {'service_name': stage.service_name})
             if result['success']:
-                stage.write({
-                    'service_status': ok_status == 'running',
-                    'odoo_status': ok_status,
-                    'last_status_check': fields.Datetime.now()})
-                return {'ok': True, 'message': ok_message}
+                return {'ok': True, 'message': ok_message, 'odoo_status': ok_status,
+                        'service_status': ok_status == 'running'}
             return {'ok': False, 'message': result['output']}
         return work
 

@@ -63,8 +63,10 @@ class UpgradeModuleWizard(models.TransientModel):
             }
             result = stg._run_ansible_playbook(playbook, stg._build_inventory(), extra_vars)
             if result['success']:
-                stg.service_status = True
-                return {'ok': True, 'message': _('✅ Module %s upgraded on %s')
+                # Return the status hint; _run_bg persists it (work must not write
+                # the DB — its phase-1 transaction is rolled back).
+                return {'ok': True, 'service_status': True,
+                        'message': _('✅ Module %s upgraded on %s')
                         % (module_name, database_name)}
             return {'ok': False, 'message': result['output']}
 
