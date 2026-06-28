@@ -162,22 +162,6 @@ class BackupStorage(models.AbstractModel):
     # Pruning / purging
     # ------------------------------------------------------------------
     @api.model
-    def _delete_key(self, key):
-        """Delete a single object from the Space (best-effort)."""
-        if not key:
-            return
-        try:
-            self._boto_client().delete_object(Bucket=self._bucket(), Key=key)
-        except Exception:  # noqa: BLE001
-            _logger.exception("Delete object failed for %s", key)
-
-    @api.model
-    def _manual_delete_delay(self):
-        """Grace period (seconds) before a downloaded manual backup is removed from
-        the Space. Long enough for the browser's auto-download to finish."""
-        return self._int_cfg('server.backup.manual_delete_delay', 300)
-
-    @api.model
     def _purge_prefix(self, key_prefix):
         """Delete ALL objects under `key_prefix` (regardless of age)."""
         cli = self._boto_client()

@@ -36,7 +36,8 @@
                     <group>
                         <group string="Connection">
                             <field name="ip" placeholder="192.168.1.10" required="1"/>
-                            <field name="ssh_port" required="1"/>
+                            <field name="ssh_port" required="1"
+                                   groups="odoo_server_management.group_devops"/>
                         </group>
                         <group string="Status">
                             <field name="instance_count"/>

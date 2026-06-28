@@ -35,7 +35,7 @@ class ServerHost(models.Model):
     # Only the connection endpoint lives on the host: IP + port. The SSH user
     # and key are global (Settings → SSH).
     ssh_port = fields.Integer(
-        string='Port', required=True,
+        string='Port', required=True, groups=GROUP_DEVOPS,
         default=lambda s: s.env['server.stage']._default_ssh_port(),
     )
     notes = fields.Text(string='Notes')
