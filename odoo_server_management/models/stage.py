@@ -495,8 +495,10 @@ class Stage(models.Model):
     # ===========================
     def _op_started_toast(self, label):
         """Immediate, non-reloading toast returned by every background action so the
-        button spinner clears at once (and a wizard modal closes). The real result
-        arrives later as a bus toast (see _run_bg)."""
+        button spinner clears at once AND any open wizard modal closes — `next` runs
+        an act_window_close after the toast, so the user can't re-click and fire the
+        job twice (a no-op for direct form/list buttons that aren't in a dialog). The
+        real result arrives later as a bus toast (see _run_bg)."""
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
@@ -506,6 +508,7 @@ class Stage(models.Model):
                 'message': _('⏳ %s started — you will be notified when it finishes.')
                            % label,
                 'sticky': False,
+                'next': {'type': 'ir.actions.act_window_close'},
             },
         }
 
