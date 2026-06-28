@@ -12,13 +12,13 @@
         <field name="active" eval="True"/>
     </record>
 
-    <!-- Auto-refresh each instance's running/stopped status (every 15 min). -->
+    <!-- Auto-refresh each instance's running/stopped status (every 5 min). -->
     <record id="cron_refresh_status" model="ir.cron">
         <field name="name">Server Management: Refresh instance status</field>
         <field name="model_id" ref="model_server_stage"/>
         <field name="state">code</field>
         <field name="code">model._cron_refresh_status()</field>
-        <field name="interval_number">15</field>
+        <field name="interval_number">5</field>
         <field name="interval_type">minutes</field>
         <field name="numbercall">-1</field>
         <field name="active" eval="True"/>
@@ -38,10 +38,10 @@
         <field name="nextcall" eval="(DateTime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')"/>
     </record>
 
-    <!-- Empty every project's 'manual/' on-demand backups daily at 03:00. -->
+    <!-- Empty the shared Space's 'manual/' on-demand backups daily at 03:00. -->
     <record id="cron_purge_manual" model="ir.cron">
         <field name="name">Server Management: Purge manual backups (daily 03:00)</field>
-        <field name="model_id" ref="model_server_backup_project"/>
+        <field name="model_id" ref="model_server_backup_storage"/>
         <field name="state">code</field>
         <field name="code">model._cron_purge_manual()</field>
         <field name="interval_number">1</field>
@@ -49,6 +49,19 @@
         <field name="numbercall">-1</field>
         <field name="active" eval="True"/>
         <field name="nextcall" eval="(DateTime.now().replace(hour=3, minute=0, second=0, microsecond=0) + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')"/>
+    </record>
+
+    <!-- Ensure every reachable server has the self-backup agent installed
+         (auto-covers newly added servers). Hourly; no-op once all are done. -->
+    <record id="cron_ensure_agents" model="ir.cron">
+        <field name="name">Server Management: Ensure backup agents installed</field>
+        <field name="model_id" ref="model_server_host"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_ensure_agents()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">hours</field>
+        <field name="numbercall">-1</field>
+        <field name="active" eval="True"/>
     </record>
 
     <!-- Daily auto-stop of instances running longer than the configured days. -->

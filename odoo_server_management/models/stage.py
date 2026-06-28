@@ -21,9 +21,10 @@ SECRET_KEY_ENV = 'ODOO_SERVER_MGMT_KEY'
 
 # Role groups used for in-method authorization (defense in depth behind sudo()).
 # Hierarchy (each implies the previous): User -> Operator -> Administrator.
-GROUP_USER = 'odoo_server_management.group_user'          # perform actions
-GROUP_OPERATOR = 'odoo_server_management.group_operator'  # + manage/discover servers
-GROUP_ADMIN = 'odoo_server_management.group_admin'        # + see all details + settings
+GROUP_USER = 'odoo_server_management.group_user'          # Developer: act on stages
+GROUP_OPERATOR = 'odoo_server_management.group_operator'  # Operational: + servers/discover/agent
+GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: everything except settings
+GROUP_ADMIN = 'odoo_server_management.group_admin'        # Administrator: + General Settings
 
 # Keys whose values must never be written to ir.logging / process output.
 SENSITIVE_VAR_KEYS = {
@@ -77,25 +78,25 @@ class Stage(models.Model):
     # services across several versions, so every path/version lives here.
     service_name = fields.Char(string='Service Name', required=True)
     odoo_version = fields.Char(string='Odoo Version', readonly=True)
-    odoo_bin = fields.Char(string='odoo-bin Path', readonly=True, groups=GROUP_ADMIN)
-    python_bin = fields.Char(string='Python Path', readonly=True, groups=GROUP_ADMIN)
+    odoo_bin = fields.Char(string='odoo-bin Path', readonly=True, groups=GROUP_DEVOPS)
+    python_bin = fields.Char(string='Python Path', readonly=True, groups=GROUP_DEVOPS)
     # Auto-detected — optional so partially-discovered instances can still be
     # saved and flagged via needs_review; actions validate before use.
-    log_file_path = fields.Char(string='Log File Path', groups=GROUP_ADMIN)
-    conf_file = fields.Char(string='Conf File', groups=GROUP_ADMIN)
-    upgrade_module_path = fields.Char(string='Upgrade Module Path', groups=GROUP_ADMIN)
+    log_file_path = fields.Char(string='Log File Path', groups=GROUP_DEVOPS)
+    conf_file = fields.Char(string='Conf File', groups=GROUP_DEVOPS)
+    upgrade_module_path = fields.Char(string='Upgrade Module Path', groups=GROUP_DEVOPS)
     http_port = fields.Integer(string='HTTP Port', readonly=True)
     needs_review = fields.Boolean(
         string='Needs Review', default=False,
         help="Set when auto-discovery could not determine every value.",
     )
 
-    odoo_user = fields.Char(string='Odoo User', groups=GROUP_ADMIN)
+    odoo_user = fields.Char(string='Odoo User', groups=GROUP_DEVOPS)
     # Stored encrypted at rest; never exposed directly in views. The plaintext
     # is only available through the computed `admin_password` (DevOps only).
-    admin_password_enc = fields.Char(string='Odoo Admin Password (encrypted)', groups=GROUP_ADMIN)
+    admin_password_enc = fields.Char(string='Odoo Admin Password (encrypted)', groups=GROUP_DEVOPS)
     admin_password = fields.Char(
-        string='Odoo Admin Password', groups=GROUP_ADMIN,
+        string='Odoo Admin Password', groups=GROUP_DEVOPS,
         compute='_compute_admin_password', inverse='_inverse_admin_password',
         store=False,
     )
@@ -115,7 +116,7 @@ class Stage(models.Model):
     # Admin-only: whether the daily auto-stop job may stop this instance (only
     # has effect when its host's "Stop Instances" is enabled).
     auto_stop = fields.Boolean(
-        string='Auto-Stop', default=True, groups=GROUP_ADMIN,
+        string='Auto-Stop', default=True, groups=GROUP_DEVOPS,
         help="If the server's 'Stop Instances' is on, stop this instance once "
              "its service has been running longer than the configured days.",
     )
@@ -135,6 +136,39 @@ class Stage(models.Model):
     # during discovery — powers the Upgrade wizard's module dropdown.
     available_modules = fields.Text(string="Available Modules", readonly=True, copy=False)
 
+    # Stored backups for this stage, listed live from the object Space. Computed
+    # (no @api.depends) so it auto-refreshes from storage every time the stage
+    # record is opened — only for that one record. It writes REAL transient rows
+    # (not NewId) so the form renders them.
+    backup_file_ids = fields.One2many(
+        'server.backup.file', 'stage_id', string='Stored Backups',
+        compute='_compute_backup_file_ids')
+
+    def _compute_backup_file_ids(self):
+        BF = self.env['server.backup.file']
+        configured = self.env['server.backup.storage']._keys_set()
+        for stage in self:
+            recs = BF.browse()
+            if stage.id and configured:
+                try:
+                    recs = BF._populate_for_stage(stage)
+                except Exception:  # noqa: BLE001 — never break the form on a storage hiccup
+                    _logger.exception("Listing backups failed for stage %s", stage.id)
+            stage.backup_file_ids = recs
+
+    def action_open_form(self):
+        """Open this stage's full form (incl. the auto-loaded Backups page) from
+        the host's inline instance list."""
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'name': self.name or _('Stage'),
+            'res_model': 'server.stage',
+            'res_id': self.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
     _sql_constraints = [
         ('unique_stage_name', 'unique(name)', 'Stage name must be unique!'),
     ]
@@ -149,9 +183,9 @@ class Stage(models.Model):
     @api.model
     def _default_ssh_port(self):
         try:
-            return int(self.env['ir.config_parameter'].sudo().get_param('server.ssh.port') or 22)
+            return int(self.env['ir.config_parameter'].sudo().get_param('server.ssh.port') or 7812)
         except (TypeError, ValueError):
-            return 22
+            return 7812
 
     @api.model
     def _ssh_key_file(self):
@@ -685,7 +719,8 @@ class Stage(models.Model):
 
         result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
         if result['success']:
-            self.service_status = True
+            self.write({'service_status': True, 'odoo_status': 'running',
+                        'last_status_check': fields.Datetime.now()})
             return self._notify(_('🔁Service restarted successfully'))
         raise UserError(_('❌Failed to restart service: %s') % result['output'])
 
@@ -698,7 +733,8 @@ class Stage(models.Model):
 
         result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
         if result['success']:
-            self.service_status = False
+            self.write({'service_status': False, 'odoo_status': 'stopped',
+                        'last_status_check': fields.Datetime.now()})
             return self._notify(_('🛑Service stopped successfully'))
         raise UserError(_('❌Failed to stop service: %s') % result['output'])
 
@@ -711,7 +747,8 @@ class Stage(models.Model):
 
         result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
         if result['success']:
-            self.service_status = True
+            self.write({'service_status': True, 'odoo_status': 'running',
+                        'last_status_check': fields.Datetime.now()})
             return self._notify(_('🟢Service started successfully'))
         raise UserError(_('❌Failed to start service: %s') % result['output'])
 

@@ -20,4 +20,15 @@ access_pull_wizard_admin,server.pull.wizard.admin,model_server_pull_wizard,odoo_
 access_upgrade_wizard_admin,server.upgrade.module.wizard.admin,model_server_upgrade_module_wizard,odoo_server_management.group_admin,1,1,1,1
 access_backup_wizard_admin,server.backup.database.wizard.admin,model_server_backup_database_wizard,odoo_server_management.group_admin,1,1,1,1
 access_github_settings_admin,server.github.settings.admin,model_server_github_settings,odoo_server_management.group_admin,1,1,1,1
-access_backup_project_admin,server.backup.project.admin,model_server_backup_project,odoo_server_management.group_admin,1,1,1,1
+access_backup_file_user,server.backup.file.user,model_server_backup_file,odoo_server_management.group_user,1,1,1,1
+access_backup_file_admin,server.backup.file.admin,model_server_backup_file,odoo_server_management.group_admin,1,1,1,1
+access_host_devops,server.host.devops,model_server_host,odoo_server_management.group_devops,1,1,1,1
+access_stage_devops,server.stage.devops,model_server_stage,odoo_server_management.group_devops,1,1,1,1
+access_stage_branch_devops,server.stage.branch.devops,model_server_stage_branch,odoo_server_management.group_devops,1,1,1,1
+access_repo_devops,server.repository.devops,model_server_repository,odoo_server_management.group_devops,1,1,1,1
+access_repo_branch_devops,server.repository.branch.devops,model_server_repository_branch,odoo_server_management.group_devops,1,1,1,1
+access_path_devops,server.stage.repo.branch.path.devops,model_server_stage_repo_branch_path,odoo_server_management.group_devops,1,1,1,1
+access_view_conf_wizard_devops,server.view.conf.wizard.devops,model_server_view_conf_wizard,odoo_server_management.group_devops,1,1,1,1
+access_pull_wizard_devops,server.pull.wizard.devops,model_server_pull_wizard,odoo_server_management.group_devops,1,1,1,1
+access_upgrade_wizard_devops,server.upgrade.module.wizard.devops,model_server_upgrade_module_wizard,odoo_server_management.group_devops,1,1,1,1
+access_backup_wizard_devops,server.backup.database.wizard.devops,model_server_backup_database_wizard,odoo_server_management.group_devops,1,1,1,1

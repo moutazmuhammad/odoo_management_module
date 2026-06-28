@@ -3,12 +3,13 @@ import re
 import json
 import math
 import base64
+import secrets
 import logging
 
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError, AccessError, ValidationError
 
-from .stage import GROUP_OPERATOR, GROUP_ADMIN
+from .stage import GROUP_OPERATOR, GROUP_DEVOPS, GROUP_ADMIN
 
 _logger = logging.getLogger(__name__)
 
@@ -38,22 +39,44 @@ class ServerHost(models.Model):
         default=lambda s: s.env['server.stage']._default_ssh_port(),
     )
     notes = fields.Text(string='Notes')
-    # Admin-only: enable the daily auto-stop job for this server.
+    # When set, this server and all its instances/details are visible ONLY to
+    # DevOps and Administrators (enforced by record rules). Operational users
+    # cannot see or access it at all.
+    devops_only = fields.Boolean(
+        string='DevOps Only', groups=GROUP_DEVOPS, default=False,
+        help="Restrict this server (and its instances) to DevOps and "
+             "Administrators only — Operational users cannot see it.")
+    # Admin-only: enable the daily auto-stop job for this server. Off by default.
     auto_stop_enabled = fields.Boolean(
-        string='Stop Instances', groups=GROUP_ADMIN,
+        string='Stop Instances', groups=GROUP_DEVOPS, default=False,
         help="Auto-stop instances on this server whose service has been running "
              "longer than the configured number of days (Settings → Auto-Stop).",
     )
 
     key_authorized = fields.Boolean(string='Key Authorized', default=False, readonly=True)
     last_discovery = fields.Datetime(string='Last Discovery', readonly=True)
-    # Object-storage target for this server's daily backups. All services on the
-    # server are backed up to this project's bucket (per-project credentials).
-    backup_project_id = fields.Many2one(
-        'server.backup.project', string='Backup Project', ondelete='set null',
-        help="DigitalOcean project / bucket where this server's daily database "
-             "backups are stored. Leave empty to exclude the server from daily "
-             "backups.")
+    # All servers back up to the single shared Space (configured globally in
+    # General Settings). This selection becomes the top-level folder in the
+    # bucket, so backups land under <bucket>/<category>/<ip-or-domain>/<db>/.
+    backup_category = fields.Selection(
+        [('odex', 'Odex'), ('erp', 'ERP')],
+        string='Backup Category', required=True, default='odex',
+        help="Top-level folder for this server's backups in the shared Space: "
+             "<bucket>/<category>/<ip-or-domain>/<db>/<db>_<date>.zip.")
+    backup_extra_dbs = fields.Text(
+        string='Additional Databases to Back Up', groups=GROUP_DEVOPS,
+        help="Exact database names (comma- or newline-separated) to ALWAYS back "
+             "up for this server, in addition to the one canonical DB auto-"
+             "detected per stage. Use this for multi-database instances and for "
+             "stages where several DB copies exist so the live one can't be "
+             "guessed. Names not found on the server are ignored.")
+    # Decentralized agent: when enabled, a local cron on the server runs the
+    # backup (presign-on-demand) and the manager's daily cron skips this host.
+    backup_agent_enabled = fields.Boolean(
+        string='Self-Backup Agent Installed', readonly=True, copy=False,
+        groups=GROUP_DEVOPS)
+    agent_token = fields.Char(string='Agent Token', groups=GROUP_DEVOPS,
+                              readonly=True, copy=False)
     last_backup = fields.Datetime(string='Last Daily Backup', readonly=True)
     stage_ids = fields.One2many('server.stage', 'host_id', string='Detected Instances')
     instance_count = fields.Integer(compute='_compute_instance_count')
@@ -112,8 +135,8 @@ class ServerHost(models.Model):
             ))
 
     def action_open_terminal(self):
-        """Open the web SSH console for this host (new tab). Operator+ allowed."""
-        self.env['server.stage']._check_access(GROUP_OPERATOR)
+        """Open the web SSH console for this host (new tab). DevOps+ allowed."""
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         self._require_key()
         return {
@@ -123,7 +146,7 @@ class ServerHost(models.Model):
         }
 
     def action_test_connection(self):
-        self.env['server.stage']._check_access(GROUP_OPERATOR)
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         self._require_key()
         result = self._run('ping.yml')
@@ -217,7 +240,7 @@ class ServerHost(models.Model):
 
     def action_check_status(self):
         """Refresh the Odoo status of every instance on this host (parallel)."""
-        self.env['server.stage']._check_access(GROUP_OPERATOR)
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         self.stage_ids.action_check_status()
         return self.env['server.stage']._notify(
@@ -248,100 +271,205 @@ class ServerHost(models.Model):
     _BACKUP_SINGLE_LIMIT = 4 * 1024 ** 3
     _BACKUP_PART_SIZE = 512 * 1024 ** 2
 
-    def _run_daily_backup(self, project=None):
-        """Detect every DB on this host and upload each to the project's bucket
+    def _run_daily_backup(self, project=None, only_dbs=None):
+        """Detect every DB on this host and upload each to the shared Space
         (single or multipart, pre-signed — keys never leave Odoo), then prune old
-        objects. Returns the number of databases uploaded successfully."""
+        objects. Returns the number of databases uploaded successfully.
+
+        `only_dbs` (optional list) restricts the run to those database names —
+        used by targeted/self-test runs and scoped backups.
+
+        Everything (dump + zip + upload) runs ON this client server; the manager
+        only mints the short-lived pre-signed URLs."""
         self.ensure_one()
-        project = project or self.backup_project_id
-        if not project:
+        Storage = self.env['server.backup.storage']
+        if not Storage._keys_set():
+            _logger.warning("Backup skipped for host %s: storage not configured.",
+                            self.name)
             return 0
 
         # 1. Detect databases live on the server (picks up new services/DBs).
-        detect = self._run('backup_detect.yml')
+        #    Pass the per-host override list so multi-DB / ambiguous stages are
+        #    force-included by exact name.
+        extra = [x.strip() for x in re.split(r'[,\n]', self.backup_extra_dbs or '')
+                 if x.strip()]
+        force_b64 = (base64.b64encode(json.dumps(extra).encode()).decode()
+                     if extra else '')
+        detect = self._run('backup_detect.yml', {'force_dbs_b64': force_b64})
         if not detect.get('success'):
             _logger.warning("Backup detect failed on host %s: %s",
                             self.name, (detect.get('output') or '')[:300])
             return 0
         items = self._parse_backup_json(detect.get('output'), 'ODOO_BACKUP_DETECT:') or []
+        if only_dbs:
+            wanted = set(only_dbs)
+            items = [it for it in items if it.get('db') in wanted]
         if not items:
             _logger.info("No Odoo databases detected on host %s", self.name)
             return 0
 
-        # 2. Per DB pick single vs multipart by an upper-bound size estimate and
-        #    pre-sign the upload (keys stay in Odoo). Track multipart uploads so
-        #    we can complete/abort them afterwards.
-        server_slug = self._slug(self.name)
+        # 2. Back up each DB in its OWN ansible run so every database has its own
+        #    timeout and a single huge/slow DB can never starve the rest —
+        #    completed DBs persist even if a later one fails. Temp disk on the
+        #    client is bounded to one DB at a time. (Scales to many DBs/servers.)
+        category = self.backup_category or 'odex'
         day = fields.Date.to_string(fields.Date.context_today(self))
         ip_seg = (self.ip or '').replace('.', '-')
-        targets, multipart = {}, {}
-        for it in items:
-            db = it.get('db')
-            if not db:
-                continue
-            seg = it.get('domain') or ip_seg
-            key = project._object_key([server_slug, seg, db, '%s.zip' % day])
-            size = int(it.get('size') or 0)
-            fs = it.get('filestore') or ''
-            try:
-                if size < self._BACKUP_SINGLE_LIMIT:
-                    targets[db] = {'mode': 'single', 'filestore': fs,
-                                   'url': project._presign_put(key, ttl=12 * 3600)}
-                else:
-                    upload_id = project._create_multipart(key)
-                    nparts = min(10000, math.ceil(size / self._BACKUP_PART_SIZE) + 5)
-                    part_urls = [project._presign_part(key, upload_id, i + 1)
-                                 for i in range(nparts)]
-                    targets[db] = {'mode': 'multipart', 'filestore': fs,
-                                   'upload_id': upload_id,
-                                   'part_size': self._BACKUP_PART_SIZE,
-                                   'part_urls': part_urls}
-                    multipart[db] = {'key': key, 'upload_id': upload_id}
-            except Exception:
-                _logger.exception("Presign/init failed for %s/%s", self.name, db)
-        if not targets:
-            return 0
-
-        # 3. Build + upload on the server (long timeout — large DBs).
-        payload = base64.b64encode(json.dumps(targets).encode()).decode()
-        run = self._run('backup_run.yml', {'targets_b64': payload}, timeout=6 * 3600)
-        results = self._parse_backup_json(run.get('output'), 'ODOO_BACKUP_RESULT:') or {}
-
-        # 4. Finalise: complete multiparts that uploaded; abort the rest.
         ok = 0
-        for db, res in results.items():
-            mp = multipart.get(db)
-            if isinstance(res, dict) and res.get('ok'):
-                if res.get('mode') == 'multipart' and mp:
-                    try:
-                        project._complete_multipart(mp['key'], mp['upload_id'],
-                                                    res.get('parts') or [])
-                    except Exception:
-                        _logger.exception("Complete multipart failed %s/%s",
-                                          self.name, db)
-                        project._abort_multipart(mp['key'], mp['upload_id'])
-                        continue
-                ok += 1
-            else:
-                if mp:
-                    project._abort_multipart(mp['key'], mp['upload_id'])
-                _logger.warning("Backup failed for %s/%s: %s", self.name, db,
-                                (res or {}).get('error') if isinstance(res, dict) else res)
-        # Abort multiparts whose DB never reported back (e.g. timeout).
-        for db, mp in multipart.items():
-            if db not in results:
-                project._abort_multipart(mp['key'], mp['upload_id'])
+        for it in items:
+            try:
+                if self._backup_one_db(Storage, it, category, day, ip_seg):
+                    ok += 1
+            except Exception:
+                _logger.exception("Backup errored for %s/%s",
+                                  self.name, it.get('db'))
 
-        # 5. Prune old objects for this server under the project.
+        # 3. Prune old daily objects for this server (scoped to its folders).
         try:
-            project._prune(project._object_key([server_slug]) + '/', project.retention_days)
+            Storage._prune(Storage._object_key([category, ip_seg]) + '/')
+            for dom in {it.get('domain') for it in items if it.get('domain')}:
+                Storage._prune(Storage._object_key([category, dom]) + '/')
         except Exception:
             _logger.exception("Backup prune failed for host %s", self.name)
 
         self.sudo().last_backup = fields.Datetime.now()
         _logger.info("Daily backup on host %s: %s/%s databases uploaded to %s",
-                     self.name, ok, len(targets), project.bucket)
+                     self.name, ok, len(items), Storage._bucket())
         return ok
+
+    def _backup_one_db(self, Storage, it, category, day, ip_seg):
+        """Build + upload ONE database in its own ansible run (own timeout).
+        Completes/aborts its multipart upload. Returns True on success."""
+        self.ensure_one()
+        db = it.get('db')
+        if not db:
+            return False
+        seg = it.get('domain') or ip_seg
+        key = Storage._object_key([category, seg, db, '%s_%s.zip' % (db, day)])
+        size = int(it.get('size') or 0)
+        fs = it.get('filestore') or ''
+        mp = None
+        if size < self._BACKUP_SINGLE_LIMIT:
+            target = {'mode': 'single', 'filestore': fs,
+                      'url': Storage._presign_put(key, ttl=12 * 3600)}
+        else:
+            upload_id = Storage._create_multipart(key)
+            nparts = min(10000, math.ceil(size / self._BACKUP_PART_SIZE) + 5)
+            part_urls = [Storage._presign_part(key, upload_id, i + 1)
+                         for i in range(nparts)]
+            target = {'mode': 'multipart', 'filestore': fs, 'upload_id': upload_id,
+                      'part_size': self._BACKUP_PART_SIZE, 'part_urls': part_urls}
+            mp = {'key': key, 'upload_id': upload_id}
+
+        payload = base64.b64encode(json.dumps({db: target}).encode()).decode()
+        run = self._run('backup_run.yml', {'targets_b64': payload}, timeout=6 * 3600)
+        results = self._parse_backup_json(run.get('output'), 'ODOO_BACKUP_RESULT:') or {}
+        res = results.get(db)
+        if isinstance(res, dict) and res.get('ok'):
+            if res.get('mode') == 'multipart' and mp:
+                try:
+                    Storage._complete_multipart(mp['key'], mp['upload_id'],
+                                                res.get('parts') or [])
+                except Exception:
+                    _logger.exception("Complete multipart failed %s/%s", self.name, db)
+                    Storage._abort_multipart(mp['key'], mp['upload_id'])
+                    return False
+            return True
+        if mp:
+            Storage._abort_multipart(mp['key'], mp['upload_id'])
+        _logger.warning("Backup failed for %s/%s: %s", self.name, db,
+                        (res or {}).get('error') if isinstance(res, dict) else res)
+        return False
+
+    def action_run_backup_now(self):
+        """Manually run the full backup for this server right now (bypasses the
+        once-per-day / night-hour guards)."""
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
+        self.ensure_one()
+        if not self.env['server.backup.storage']._keys_set():
+            raise UserError(_(
+                "Backup storage is not configured. Set the bucket and keys in "
+                "Server Management → General Settings → Backups."))
+        n = self._run_daily_backup()
+        return self.env['server.stage']._notify(
+            _("✅ Backup complete: %s database(s) uploaded for %s.") % (n, self.name))
+
+    def _ensure_agent_token(self):
+        # Read AND write via sudo: agent_token is an admin-only field, so reading
+        # it without sudo can return empty in some contexts and wrongly
+        # regenerate the token on every deploy (desyncing the agent config).
+        self.ensure_one()
+        rec = self.sudo()
+        if not rec.agent_token:
+            rec.agent_token = secrets.token_urlsafe(32)
+        return rec.agent_token
+
+    def action_deploy_agent(self):
+        """Install the self-backup agent + a daily Linux cron on this server. The
+        server then backs itself up (presign-on-demand) with no Spaces key stored
+        locally; the manager's daily cron skips this host afterwards."""
+        self.env['server.stage']._check_access(GROUP_OPERATOR)
+        self.ensure_one()
+        self._require_key()
+        Storage = self.env['server.backup.storage']
+        if not Storage._keys_set():
+            raise UserError(_(
+                "Configure backup storage first (General Settings → Backups)."))
+        ICP = self.env['ir.config_parameter'].sudo()
+        web_url = (ICP.get_param('web.base.url') or '').strip()
+        # The URL the managed servers use to reach the manager. Defaults to
+        # web.base.url, but can be overridden (e.g. an IP) when the manager's
+        # domain isn't resolvable from the stage servers. We always send the
+        # web.base.url host as a Host header so nginx routes to the right vhost.
+        manager_url = (ICP.get_param('server.backup.agent_manager_url') or web_url).strip()
+        if not manager_url:
+            raise UserError(_(
+                "Set the manager URL the servers should use: General Settings → "
+                "Backups → Agent Manager URL (or configure web.base.url)."))
+        from urllib.parse import urlparse
+        host_header = urlparse(web_url).hostname or ''
+        try:
+            hour = int(ICP.get_param('server.backup.hour', default='2') or 2)
+        except (TypeError, ValueError):
+            hour = 2
+        hour = max(0, min(23, hour))
+        token = self._ensure_agent_token()
+        res = self._run('deploy_agent.yml', {
+            'agent_token': token,
+            'manager_url': manager_url,
+            'host_header': host_header,
+            'backup_hour': hour,
+            'jitter': (self.id * 7) % 60,           # spread servers across the hour
+            'extra_dbs': (self.backup_extra_dbs or '').replace('\n', ','),
+        })
+        if not res.get('success'):
+            raise UserError(_("Agent deploy failed:\n%s") % (res.get('output') or ''))
+        self.sudo().backup_agent_enabled = True
+        return self.env['server.stage']._notify(
+            _("✅ Self-backup agent installed on %s (daily at %02d:%02d, server "
+              "time). The manager will no longer back this host up itself.")
+            % (self.name, hour, (self.id * 7) % 60))
+
+    @api.model
+    def _cron_ensure_agents(self):
+        """Make sure every reachable server runs the self-backup agent. New hosts
+        get it installed automatically once their SSH key is authorized — so
+        'every server takes backup' needs no manual step. Controlled by the
+        'Auto-install backup agent' setting (on by default)."""
+        ICP = self.env['ir.config_parameter'].sudo()
+        if ICP.get_param('server.backup.agent_auto_deploy', default='1') in ('0', 'false', 'False', ''):
+            return
+        if not self.env['server.backup.storage']._keys_set():
+            return
+        hosts = self.search([('key_authorized', '=', True),
+                             ('backup_agent_enabled', '=', False)])
+        for host in hosts:
+            try:
+                host.action_deploy_agent()
+                self.env.cr.commit()
+            except Exception:
+                self.env.cr.rollback()
+                _logger.exception("Auto-deploy agent failed for host %s", host.id)
 
     @api.model
     def _cron_daily_backups(self):
@@ -357,15 +485,25 @@ class ServerHost(models.Model):
         now = fields.Datetime.now()      # server time (UTC)
         if now.hour != hour:
             return
+        Storage = self.env['server.backup.storage']
+        if not (Storage._daily_enabled() and Storage._keys_set()):
+            return
         today = now.date()
-        hosts = self.search([('backup_project_id', '!=', False)])
+        # Every host is enrolled automatically (no per-host setup). Hosts that run
+        # their own local cron agent back themselves up — skip those here.
+        hosts = self.search([('backup_agent_enabled', '=', False)])
         for host in hosts:
-            if not host.backup_project_id.daily_backup_enabled:
-                continue
             # Already backed up today (e.g. a manual run, or a second tick)? Skip.
             if host.last_backup and host.last_backup.date() == today:
                 continue
             try:
+                # Refresh this host's database list right before backing it up, so
+                # the run (and the per-stage view) reflect today's live databases.
+                try:
+                    host._refresh_databases()
+                except Exception:
+                    _logger.exception("Pre-backup DB refresh failed for host %s",
+                                      host.id)
                 host._run_daily_backup()
                 self.env.cr.commit()
             except Exception:

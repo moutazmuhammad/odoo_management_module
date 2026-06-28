@@ -69,30 +69,29 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         self.ensure_one()
         stage = self.stage_id.sudo()
         host = stage.host_id
-        project = host.backup_project_id
-        if not project:
+        Storage = self.env['server.backup.storage']
+        if not Storage._keys_set():
             raise UserError(_(
-                "This server has no Backup Project assigned. Assign one in "
-                "Server Management → Servers → Backups — it provides the bucket "
-                "and credentials."))
+                "Backup storage is not configured. Set the bucket and keys in "
+                "Server Management → General Settings → Backups."))
 
         # Manual backups live under a separate 'manual/' area with a FIXED key per
-        # (server, db): each press OVERWRITES the previous one, so there's only
-        # ever a single latest manual backup per database. The whole 'manual/'
-        # area is wiped daily at 03:00 (see _cron_purge_manual). The daily
-        # retention prune only touches '<server>/', so it never affects these.
-        server_slug = self.env['server.host']._slug(host.name)
+        # (category, server, db): each press OVERWRITES the previous one, so there
+        # is only ever a single latest manual backup per database. The whole
+        # 'manual/' area is wiped daily at 03:00 (see _cron_purge_manual). The
+        # daily retention prune only touches '<category>/...', so it never affects
+        # these.
+        category = host.backup_category or 'odex'
         seg = (host.ip or '').replace('.', '-')
         ext = 'dump' if self.backup_format == 'dump' else 'zip'
-        key = project._object_key(
-            ['manual', server_slug, seg, '%s.%s' % (self.db_name, ext)])
+        key = Storage._object_key(
+            ['manual', category, seg, '%s.%s' % (self.db_name, ext)])
         try:
-            put_url = project._presign_put(key, ttl=3 * 3600)
+            put_url = Storage._presign_put(key, ttl=3 * 3600)
         except UserError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise UserError(_("Could not reach object storage for project '%s': %s")
-                            % (project.name, exc))
+            raise UserError(_("Could not reach object storage: %s") % exc)
 
         # Dump on the server and upload straight to the bucket via the pre-signed
         # URL — no object-storage credentials touch the managed server.
@@ -111,7 +110,7 @@ class ServerBackupDatabaseWizard(models.TransientModel):
 
         filename = '%s.%s' % (self.db_name, ext)
         try:
-            download_url = project._presign_get(key, filename=filename)
+            download_url = Storage._presign_get(key, filename=filename)
         except Exception:  # noqa: BLE001
             download_url = ''
         # target 'self' + the attachment disposition makes the browser DOWNLOAD
@@ -123,7 +122,7 @@ class ServerBackupDatabaseWizard(models.TransientModel):
             'tag': 'display_notification',
             'params': {
                 'title': _('Database Backup'),
-                'message': _('✅ Backup uploaded to %s.') % project.bucket,
+                'message': _('✅ Backup uploaded to %s.') % Storage._bucket(),
                 'type': 'success',
                 'sticky': False,
             },

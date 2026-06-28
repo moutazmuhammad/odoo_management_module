@@ -5,7 +5,7 @@
         <field name="name">server.github.settings.form</field>
         <field name="model">server.github.settings</field>
         <field name="arch" type="xml">
-            <form string="GitHub Configuration">
+            <form string="General Settings">
                 <sheet>
                     <group string="GitHub">
                         <field name="github_user"/>
@@ -32,11 +32,35 @@
                                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...leave empty to keep the current key; paste a new one here to replace it..."/>
                         <field name="ssh_private_key_file" placeholder="(optional) /home/odoo/.ssh/id_ed25519"/>
                     </group>
-                    <group string="Backups (schedule)">
+                    <group string="Backups (single shared Space for all servers)">
+                        <field name="backup_daily_enabled"/>
+                        <field name="backup_agent_auto_deploy"/>
                         <field name="backup_hour"/>
-                        <div colspan="2" class="text-muted">
-                            Buckets and credentials live on each
-                            <b>Backup Project</b>; assign one to each server.
+                        <field name="backup_bucket" placeholder="my-backup-space"/>
+                        <field name="backup_region" placeholder="fra1"/>
+                        <field name="backup_endpoint"
+                               placeholder="(optional) https://fra1.digitaloceanspaces.com"/>
+                        <field name="backup_prefix" placeholder="(optional) folder prefix"/>
+                        <field name="backup_retention_days"/>
+                        <field name="backup_signed_url_ttl"/>
+                        <field name="backup_agent_manager_url"
+                               placeholder="(optional) http://MANAGER-IP  — for self-backup agents"/>
+                        <field name="backup_keys_set" invisible="1"/>
+                        <div colspan="2" attrs="{'invisible': [('backup_keys_set','=',False)]}">
+                            <span class="text-success">✔ Backup credentials are configured.</span>
+                            Type new ones below only to replace them.
+                        </div>
+                        <field name="backup_access_key"
+                               placeholder="leave empty to keep the current key"/>
+                        <field name="backup_secret_key" password="True"
+                               placeholder="leave empty to keep the current key"/>
+                        <div colspan="2" class="text-muted" style="font-size:12px;">
+                            One Space holds every server's backups. Each server's
+                            <b>erp/odex</b> category becomes the top folder:
+                            <code>&lt;bucket&gt;/&lt;category&gt;/&lt;ip-or-domain&gt;/&lt;db&gt;/&lt;db&gt;_&lt;date&gt;.zip</code>.
+                            <button string="Test Storage" type="object"
+                                    name="action_test_backup_storage"
+                                    class="btn-link" icon="fa-plug"/>
                         </div>
                     </group>
                     <group string="Auto-Stop Instances">
@@ -64,7 +88,7 @@
 
     <!-- Action to open settings from menu -->
     <record id="action_github_settings" model="ir.actions.act_window">
-        <field name="name">GitHub Configuration</field>
+        <field name="name">General Settings</field>
         <field name="res_model">server.github.settings</field>
         <field name="view_mode">form</field>
         <field name="target">new</field>
@@ -72,7 +96,7 @@
 
     <!-- Menu item under Settings -->
     <menuitem id="menu_github_settings"
-              name="GitHub Configuration"
+              name="General Settings"
               parent="menu_repo_management"
               action="action_github_settings"
               sequence="10"

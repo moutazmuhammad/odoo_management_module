@@ -236,6 +236,48 @@ def parse_nginx():
 port_domain = parse_nginx()
 
 
+def web_base_url_domain(conf):
+    """Fallback domain for naming: the instance's own web.base.url host. Used
+    when nginx doesn't reveal a domain. Reads the DB connection from the conf
+    (local peer auth, or remote TCP) and queries ir_config_parameter. Needs a
+    single db_name in the conf; returns '' if it's a bare IP / not set."""
+    if not conf:
+        return ''
+    db_name = (conf_get(conf, 'db_name') or '').strip()
+    if not db_name or db_name.lower() in ('false', 'none'):
+        return ''
+    db_host = (conf_get(conf, 'db_host') or '').strip()
+    db_port = (conf_get(conf, 'db_port') or '').strip()
+    db_user = (conf_get(conf, 'db_user') or '').strip()
+    db_pass = conf_get(conf, 'db_password') or ''
+    sql = "SELECT value FROM ir_config_parameter WHERE key='web.base.url'"
+    env = dict(os.environ)
+    env['LC_ALL'] = 'C'
+    env['PGCONNECT_TIMEOUT'] = '5'
+    local = db_host in ('', 'localhost', '127.0.0.1', '::1')
+    if local:
+        cmd = (['sudo', '-n', '-u', 'postgres'] if SUDO else []) + \
+              ['psql', '-w', '-tAc', sql, '-d', db_name]
+    else:
+        cmd = ['psql', '-w', '-tAc', sql, '-d', db_name, '-h', db_host, '-U', db_user]
+        if db_port:
+            cmd += ['-p', db_port]
+        if db_pass:
+            env['PGPASSWORD'] = db_pass
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=12)
+        val = r.stdout.strip() if r.returncode == 0 else ''
+    except Exception:
+        val = ''
+    m = re.match(r'^\s*https?://([^/:]+)', val) if val else None
+    host = (m.group(1) if m else '').strip().lower()
+    if host in ('', 'localhost', '127.0.0.1', '0.0.0.0', '::1'):
+        return ''
+    if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):   # bare IP, not a domain
+        return ''
+    return host
+
+
 def scan_unit(unit):
     """Return the discovery dict for one systemd unit, or None if it is not an
     Odoo service. Raises only on unexpected errors (caller skips that unit)."""
@@ -301,6 +343,15 @@ def scan_unit(unit):
         if m:
             log_file = m.group(1)
 
+    # Domain for naming: prefer the nginx vhost; fall back to the instance's own
+    # web.base.url so stages show as their domain instead of <ip>:<port>.
+    domain = port_domain.get(str(http_port), '') if http_port else ''
+    if not domain:
+        try:
+            domain = web_base_url_domain(conf)
+        except Exception:
+            domain = ''
+
     return {
         'service_name': unit[:-len('.service')] if unit.endswith('.service') else unit,
         'odoo_version': detect_version(odoo_bin, python_bin),
@@ -310,7 +361,7 @@ def scan_unit(unit):
         'odoo_user': odoo_user,
         'log_file': log_file,
         'http_port': http_port,
-        'domain': port_domain.get(str(http_port), '') if http_port else '',
+        'domain': domain,
         'addons_path': addons_path,
         'data_dir': conf_get(conf, 'data_dir') or '',
         'admin_passwd': admin_pw,
