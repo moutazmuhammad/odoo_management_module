@@ -127,6 +127,11 @@ class Stage(models.Model):
         [("running", "🟢 Running"), ("stopped", "🔴 Stopped"), ("unknown", "⚪ Not checked")],
         string="Odoo Status", default='unknown', readonly=True, copy=False,
     )
+    # Live status shown on the form — computed (SSH systemctl) on every open, so it
+    # always reflects reality; it also syncs the stored odoo_status above.
+    odoo_status_live = fields.Selection(
+        [("running", "🟢 Running"), ("stopped", "🔴 Stopped"), ("unknown", "⚪ Not checked")],
+        string="Status", readonly=True, compute='_compute_status_live')
     last_status_check = fields.Datetime(string="Last Status Check", readonly=True)
     # Cached DB list (newline-separated), refreshed by a background cron every
     # 15 min so the backup/upgrade wizards open instantly without an SSH call.
@@ -136,30 +141,28 @@ class Stage(models.Model):
     # during discovery — powers the Upgrade wizard's module dropdown.
     available_modules = fields.Text(string="Available Modules", readonly=True, copy=False)
 
-    # Stored backups for this stage, listed live from the object Space. Computed
-    # (no @api.depends) so it auto-refreshes from storage every time the stage
-    # record is opened — only for that one record. It writes REAL transient rows
-    # (not NewId) so the form renders them.
+    # Stored backups for this stage — REAL transient rows (a regular One2many, so
+    # the form renders them reliably). They are (re)listed from the object Space
+    # every time the record is opened, by _load_backups() (called from the status
+    # open-hook and from action_open_form).
     backup_file_ids = fields.One2many(
-        'server.backup.file', 'stage_id', string='Stored Backups',
-        compute='_compute_backup_file_ids')
+        'server.backup.file', 'stage_id', string='Stored Backups')
 
-    def _compute_backup_file_ids(self):
-        BF = self.env['server.backup.file']
-        configured = self.env['server.backup.storage']._keys_set()
-        for stage in self:
-            recs = BF.browse()
-            if stage.id and configured:
-                try:
-                    recs = BF._populate_for_stage(stage)
-                except Exception:  # noqa: BLE001 — never break the form on a storage hiccup
-                    _logger.exception("Listing backups failed for stage %s", stage.id)
-            stage.backup_file_ids = recs
+    def _load_backups(self):
+        """(Re)list this stage's backups from the object Space into real rows."""
+        if not self.id:
+            return
+        try:
+            if self.env['server.backup.storage']._keys_set():
+                self.env['server.backup.file']._populate_for_stage(self)
+        except Exception:  # noqa: BLE001 — never break the form on a storage hiccup
+            _logger.exception("Listing backups failed for stage %s", self.id)
 
     def action_open_form(self):
         """Open this stage's full form (incl. the auto-loaded Backups page) from
         the host's inline instance list."""
         self.ensure_one()
+        self._load_backups()
         return {
             'type': 'ir.actions.act_window',
             'name': self.name or _('Stage'),
@@ -366,76 +369,49 @@ class Stage(models.Model):
     # Probe timeout per attempt (short — this is just a liveness check).
     _STATUS_TIMEOUT = 3
 
-    @api.model
-    def _probe_status(self, name):
-        """Liveness probe for one instance by its `name` (domain or ip:port).
-
-        Pure network call — touches no ORM, so it is safe to run from worker
-        threads (see action_check_status). Returns 'running' or 'stopped'."""
-        if not name:
-            return 'stopped'
-        base_url = re.sub(r'^(https?://)?', '', name.strip().lower()).rstrip('/')
-        port = None
-        if ':' in base_url:
-            try:
-                base_url, port_str = base_url.rsplit(':', 1)
-                port = int(port_str)
-                if not (1 <= port <= 65535):
-                    return 'stopped'
-            except ValueError:
-                return 'stopped'
-
-        headers = {"User-Agent": "Odoo-Server-Management"}
-        suffix = f":{port}" if port else ""
-        # Try https then http, one quick attempt each (verify=False avoids a slow
-        # extra SSL-retry round). Total worst case ~2 × _STATUS_TIMEOUT.
-        urls = [f"https://{base_url}{suffix}/web/login",
-                f"http://{base_url}{suffix}/web/login"]
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", InsecureRequestWarning)
-            for url in urls:
+    def _compute_status_live(self):
+        """Live status shown on the stage form: query the REAL systemd status over
+        SSH every time the record is opened, and keep the stored odoo_status in
+        sync so the list reflects it too."""
+        live = {}
+        for stage in self:
+            value = stage.odoo_status or 'unknown'
+            if stage.id and stage.host_id and stage.service_name:
                 try:
-                    resp = requests.get(url, headers=headers,
-                                        timeout=self._STATUS_TIMEOUT, verify=False)
-                    if resp.status_code == 200:
-                        return 'running'
-                except Exception:
-                    continue
-        return 'stopped'
-
-    def action_check_status(self):
-        """Refresh odoo_status for the selected stage(s). Probes run in parallel
-        so checking many instances (or many users acting at once) stays fast and
-        never blocks on render."""
-        self._check_access(GROUP_USER)
-        self = self.sudo()
-        names = {rec.id: rec.name for rec in self}
-        results = {}
-        if names:
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=min(12, len(names))) as pool:
-                futures = {pool.submit(self._probe_status, nm): rid
-                           for rid, nm in names.items()}
-                for fut in futures:
-                    rid = futures[fut]
-                    try:
-                        results[rid] = fut.result()
-                    except Exception:
-                        results[rid] = 'stopped'
-        now = fields.Datetime.now()
-        for rec in self:
-            rec.odoo_status = results.get(rec.id, 'unknown')
-            rec.last_status_check = now
-        return self._notify(_('🔄 Status refreshed for %s instance(s).') % len(self))
+                    statuses = stage.host_id._service_statuses(stage)
+                    v = statuses.get(stage.service_name)
+                    if v in ('active', 'activating'):
+                        value = 'running'
+                    elif v:
+                        value = 'stopped'
+                    if value != stage.odoo_status:
+                        stage.sudo().write({'odoo_status': value,
+                                            'last_status_check': fields.Datetime.now()})
+                except Exception:  # noqa: BLE001 — never block the form on a probe
+                    _logger.exception("Live status failed for stage %s", stage.id)
+                # Same open-hook: refresh this stage's backups list from storage so
+                # the Backups page is current every time the record is opened.
+                stage._load_backups()
+            live[stage.id] = value
+        # Assign the computed field LAST — after every cache-invalidating side effect
+        # above (sudo().write + _load_backups' unlink/create on server.backup.file,
+        # which touches stage.backup_file_ids and invalidates the stage cache). If we
+        # assigned odoo_status_live before those, _load_backups stranded it and Odoo
+        # raised "Compute method failed to assign … odoo_status_live" (CacheMiss).
+        for stage in self:
+            stage.odoo_status_live = live.get(stage.id, stage.odoo_status or 'unknown')
 
     @api.model
     def _cron_refresh_status(self):
-        """Background job: refresh every instance's running/stopped status so the
-        UI stays current without anyone pressing 'Check Status'. Probes run in
-        parallel (see action_check_status)."""
-        stages = self.search([])
-        if stages:
-            stages.action_check_status()
+        """Background job: refresh every instance's real (systemd) status over SSH,
+        per host, so the list stays current. Commits per host for resilience."""
+        for host in self.env['server.host'].search([]):
+            try:
+                host._refresh_status()
+                self.env.cr.commit()
+            except Exception:  # noqa: BLE001
+                self.env.cr.rollback()
+                _logger.exception("Status refresh failed for host %s", host.id)
 
     def _build_inventory(self):
         """Inventory for this stage — connection comes entirely from its host."""

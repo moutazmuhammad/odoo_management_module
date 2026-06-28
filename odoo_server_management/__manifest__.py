@@ -1,6 +1,6 @@
 {
     'name': 'Odoo Server Management',
-    'version': '1.19',
+    'version': '1.22',
     'summary': 'Manage multiple Odoo servers with Ansible integration',
     'description': """
         This module allows centralized management of multiple Odoo servers using Ansible.

@@ -238,13 +238,33 @@ class ServerHost(models.Model):
                 self.env.cr.rollback()
                 _logger.exception("Auto-stop failed for host %s", host.id)
 
-    def action_check_status(self):
-        """Refresh the Odoo status of every instance on this host (parallel)."""
-        self.env['server.stage']._check_access(GROUP_DEVOPS)
+    def _service_statuses(self, stages=None):
+        """Real systemd status of the given stages' services in one SSH session.
+        Returns {service_name: 'active'|'inactive'|'failed'|...}."""
         self.ensure_one()
-        self.stage_ids.action_check_status()
-        return self.env['server.stage']._notify(
-            _('🔄 Status refreshed for %s instance(s).') % len(self.stage_ids))
+        stages = (stages or self.stage_ids).filtered('service_name')
+        if not stages:
+            return {}
+        spec = base64.b64encode(
+            json.dumps(stages.mapped('service_name')).encode()).decode()
+        res = self._run('service_status.yml', {'spec': spec})
+        return self._parse_backup_json(res.get('output'), 'ODOO_STATUS_JSON:') or {}
+
+    def _refresh_status(self, stages=None):
+        """Write each stage's odoo_status from the REAL systemd status (SSH)."""
+        self.ensure_one()
+        stages = (stages or self.stage_ids).filtered('service_name')
+        if not stages:
+            return
+        statuses = self._service_statuses(stages)
+        now = fields.Datetime.now()
+        for st in stages.sudo():
+            v = statuses.get(st.service_name)
+            if v in ('active', 'activating'):
+                st.odoo_status = 'running'
+            elif v:
+                st.odoo_status = 'stopped'
+            st.last_status_check = now
 
     # ------------------------------------------------------------------
     # Per-project daily backups (object storage, pre-signed uploads)
@@ -533,7 +553,7 @@ class ServerHost(models.Model):
         # Populate live status (parallel, ~1s) and the DB-list cache (one SSH)
         # so the form and wizards are ready immediately, not after the next cron.
         try:
-            self.stage_ids.action_check_status()
+            self._refresh_status()
         except Exception:
             pass
         try:

@@ -474,7 +474,10 @@ def _write_zip_contents(z, conn, db, filestore):
     cmd, env = conn.dump_cmd(db, conn.server_major(db), ['--no-owner'])
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env)
-    with z.open('dump.sql', 'w') as zf:
+    # force_zip64: the dump is streamed with an unknown size into a possibly
+    # non-seekable target (multipart), so ZIP64 must be reserved up front —
+    # otherwise a >4 GB dump.sql raises "File size exceeded ZIP64 limit".
+    with z.open('dump.sql', 'w', force_zip64=True) as zf:
         while True:
             chunk = proc.stdout.read(CHUNK)
             if not chunk:

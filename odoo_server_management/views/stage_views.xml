@@ -10,10 +10,7 @@
                          can_act = False means: Client Server + current user is not Operator+. -->
                     <field name="client_stage" invisible="1"/>
                     <field name="can_act" invisible="1"/>
-                    <button name="action_check_status" type="object"
-                            string="Check Status" icon="fa-refresh" class="btn-secondary"
-                            groups="odoo_server_management.group_user"/>
-                    <field name="odoo_status" nolabel="1" readonly="1" force_save="1" style="font-weight: bold;"/>
+                    <field name="odoo_status_live" nolabel="1" readonly="1" style="font-weight: bold;"/>
 
                     <button name="action_backup_database" type="object" string="Backup URL"
                             class="btn-primary" icon="fa-database"

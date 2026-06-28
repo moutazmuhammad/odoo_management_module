@@ -1,0 +1,17 @@
+---
+# Report the real systemd status (systemctl is-active) of a host's services in
+# one SSH session. Logic in files/check_status.py.
+- hosts: all
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Check service statuses
+      script: files/check_status.py {{ spec | quote }}
+      args:
+        executable: python3
+      register: status_out
+      changed_when: false
+
+    - name: Emit status JSON
+      debug:
+        msg: "{{ status_out.stdout }}"
