@@ -112,7 +112,10 @@ class ServerBackupDatabaseWizard(models.TransientModel):
                 'presigned_url': put_url,
             }, timeout=3 * 3600)
             if not result['success']:
-                return {'ok': False, 'message': result['output']}
+                return {'ok': False,
+                        'message': _('❌ Backup of %s failed — see Last Operation '
+                                     'Details.') % db_name,
+                        'detail': result['output']}
             try:
                 download_url = St._presign_get(key, filename=filename)
             except Exception:  # noqa: BLE001

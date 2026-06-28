@@ -60,9 +60,13 @@ class PullCodeWizard(models.TransientModel):
 
         def work(stg):
             result = stg._run_ansible_playbook(playbook, stg._build_inventory(), extra_vars)
+            # Full pull log kept in `detail` (Last Operation Details) for review/debug.
             if result['success']:
-                return {'ok': True, 'message': _('📥 Code pulled successfully (%s @ %s)')
+                return {'ok': True, 'detail': result['output'],
+                        'message': _('📥 Code pulled successfully (%s @ %s)')
                         % (path, branch)}
-            return {'ok': False, 'message': result['output']}
+            return {'ok': False,
+                    'message': _('❌ Pull code failed — see Last Operation Details.'),
+                    'detail': result['output']}
 
         return stage._run_bg(_('Pull code (%s)') % branch, work)

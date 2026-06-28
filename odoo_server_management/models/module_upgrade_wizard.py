@@ -62,13 +62,19 @@ class UpgradeModuleWizard(models.TransientModel):
                 'odoo_user': stg.odoo_user,
             }
             result = stg._run_ansible_playbook(playbook, stg._build_inventory(), extra_vars)
+            # Keep the FULL upgrade log in `detail` (persisted to Last Operation
+            # Details) so the user can review it / debug errors after the job ends.
             if result['success']:
                 # Return the status hint; _run_bg persists it (work must not write
                 # the DB — its phase-1 transaction is rolled back).
                 return {'ok': True, 'service_status': True,
                         'message': _('✅ Module %s upgraded on %s')
-                        % (module_name, database_name)}
-            return {'ok': False, 'message': result['output']}
+                        % (module_name, database_name),
+                        'detail': result['output']}
+            return {'ok': False,
+                    'message': _('❌ Upgrade of %s on %s failed — see Last Operation '
+                                 'Details.') % (module_name, database_name),
+                    'detail': result['output']}
 
         return stage._run_bg(
             _('Upgrade module %s (%s)') % (module_name, database_name), work)

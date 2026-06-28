@@ -171,11 +171,13 @@ class Stage(models.Model):
     def action_refresh_backups(self):
         """Backups page button: re-list this stage's backups live from the object
         Space so the (read-only) list shows the latest from the bucket on demand.
-        The web client reloads the record after the button, surfacing the new rows."""
+        Returns a falsy value so the web client just reloads THIS record's data
+        (surfacing the new rows) — returning a truthy non-action made it re-run the
+        action and jump to another record in a list/pager."""
         self.ensure_one()
         self._check_access(GROUP_USER)
         self._load_backups()
-        return True
+        return False
 
     def action_open_form(self):
         """Open this stage's full form from the host's inline instance list. Kept
@@ -429,8 +431,19 @@ class Stage(models.Model):
         import threading
         threading.Thread(target=_worker, name='odoo-stage-status',
                          daemon=True).start()
-        return self._notify(
-            _('🔄 Refreshing status in the background — reload in a moment.'))
+        # Plain toast WITHOUT soft_reload: a soft_reload re-runs the current action
+        # and, from a list/pager, jumps to another record — so just notify and let
+        # the status land via the 30s auto-refresh (or a manual reload).
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'type': 'info', 'title': _('Status'),
+                'message': _('🔄 Refreshing status in the background — '
+                             'updates in a moment.'),
+                'sticky': False,
+            },
+        }
 
     # ===========================
     # Background action runner (non-blocking actions with async result toasts)
@@ -502,10 +515,14 @@ class Stage(models.Model):
             ok = bool(res.get('ok'))
             message = res.get('message') or (
                 _('%s finished.') % label if ok else _('%s failed.') % label)
+            # `detail` is the FULL output (e.g. the whole ansible log) persisted to
+            # op_detail so the user can review it / debug errors after the job ends.
+            # `message` stays short for the toast.
+            detail = res.get('detail') or message
             url = res.get('url') or False
             title = ('✅ %s' % label) if ok else ('❌ %s' % label)
             vals = {'op_state': 'done' if ok else 'failed',
-                    'op_time': fields.Datetime.now(), 'op_detail': message}
+                    'op_time': fields.Datetime.now(), 'op_detail': detail}
             if ok and res.get('odoo_status'):
                 vals['odoo_status'] = res['odoo_status']
                 vals['service_status'] = bool(res.get('service_status'))
@@ -845,9 +862,11 @@ class Stage(models.Model):
                 playbook, stage._build_inventory(),
                 {'service_name': stage.service_name})
             if result['success']:
-                return {'ok': True, 'message': ok_message, 'odoo_status': ok_status,
-                        'service_status': ok_status == 'running'}
-            return {'ok': False, 'message': result['output']}
+                return {'ok': True, 'message': ok_message, 'detail': result['output'],
+                        'odoo_status': ok_status, 'service_status': ok_status == 'running'}
+            return {'ok': False,
+                    'message': _('Failed — see Last Operation Details.'),
+                    'detail': result['output']}
         return work
 
     def action_restart_service(self):
