@@ -29,10 +29,13 @@ class StageRepoBranchPath(models.Model):
     pull_path = fields.Char(string='Pull Path on Server', required=True)
     display_name = fields.Char(string='Display Name', compute='_compute_display_name', store=True)
 
-    @api.depends('repository_id.name', 'branch_id.name')
+    @api.depends('repository_id.name', 'branch_id.name', 'pull_path')
     def _compute_display_name(self):
         for rec in self:
             repo = rec.repository_id.name or ''
             branch = rec.branch_id.name or ''
-            rec.display_name = f"{repo} [{branch}]"
+            # Include the checkout folder so the SAME repo cloned at different paths
+            # (each on its own branch) is distinguishable in the Pull wizard.
+            leaf = (rec.pull_path or '').rstrip('/').split('/')[-1]
+            rec.display_name = f"{repo} [{branch}]" + (f" — {leaf}" if leaf else "")
 
