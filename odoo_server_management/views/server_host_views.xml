@@ -54,6 +54,16 @@
                         </group>
                     </group>
                     <field name="notes" placeholder="Notes..."/>
+                    <group string="Last Operation" attrs="{'invisible': [('op_state', '=', False)]}">
+                        <group>
+                            <field name="op_label" readonly="1"/>
+                            <field name="op_state" readonly="1"/>
+                            <field name="op_time" readonly="1"/>
+                        </group>
+                        <field name="op_detail" readonly="1" nolabel="1" colspan="2"
+                               attrs="{'invisible': [('op_detail', '=', False)]}"
+                               placeholder="Discovery output / error…"/>
+                    </group>
                     <notebook>
                         <page string="Detected Instances" groups="odoo_server_management.group_devops">
                             <field name="stage_ids">

@@ -55,6 +55,14 @@ class ServerHost(models.Model):
 
     key_authorized = fields.Boolean(string='Key Authorized', default=False, readonly=True)
     last_discovery = fields.Datetime(string='Last Discovery', readonly=True)
+    # Durable result of the last background discovery (runs in a worker thread so a
+    # slow host never times out the request). The live toast is pushed over the bus.
+    op_label = fields.Char(string="Last Operation", readonly=True, copy=False)
+    op_state = fields.Selection(
+        [('running', '⏳ Running'), ('done', '✅ Success'), ('failed', '❌ Failed')],
+        string="Last Operation Result", readonly=True, copy=False)
+    op_time = fields.Datetime(string="Last Operation At", readonly=True, copy=False)
+    op_detail = fields.Text(string="Last Operation Details", readonly=True, copy=False)
     # All servers back up to the single shared Space (configured globally in
     # General Settings). This selection becomes the top-level folder in the
     # bucket, so backups land under
@@ -568,39 +576,81 @@ class ServerHost(models.Model):
                 _logger.exception("Daily backup failed for host %s", host.id)
 
     def action_discover(self):
-        """Detect every Odoo service on the host and sync stages."""
+        """Detect every Odoo service on the host and sync stages — in the BACKGROUND.
+
+        Discovery SSHes in and runs ansible (plus a git ls-remote per repo), which
+        can take a while; running it inline risked an HTTP timeout / lost-connection
+        error. So the click returns immediately and the work runs in a worker thread
+        that commits its DB sync and pushes the result (counts, or the error) to the
+        user as a bus toast. The outcome is also persisted on the host (op_* fields)."""
         self.env['server.stage']._check_access(GROUP_OPERATOR)
         self.ensure_one()
         self._require_key()
-        result = self._run('discover_server.yml')
-        # The raw output can embed the base64 discovery payload (which contains
-        # the detected master password); redact it before showing it to a user.
-        safe_output = self.env['server.stage']._redact_log(result['output'])
-        if not result['success']:
-            raise UserError(_('❌ Discovery failed: %s') % safe_output)
+        self.sudo().write({'op_label': _('Discover server'), 'op_state': 'running',
+                           'op_time': fields.Datetime.now(), 'op_detail': False})
+        rec_id, dbname, uid = self.id, self.env.cr.dbname, self.env.uid
+        label = _('Discover server')
 
-        instances = self._parse_discovery(result['output'])
-        if not instances:
-            raise UserError(_(
-                "No Odoo services were detected on %s.\n\n%s"
-            ) % (self.ip, safe_output))
+        def _worker():
+            import odoo
+            ok, message, detail = False, '', ''
+            try:
+                with odoo.registry(dbname).cursor() as cr:
+                    env = api.Environment(cr, uid, {})
+                    host = env['server.host'].browse(rec_id).sudo()
+                    if not host.exists():
+                        return
+                    Stage = env['server.stage']
+                    result = host._run('discover_server.yml')
+                    # The raw output can embed the discovery payload (master pwd) —
+                    # redact before showing it.
+                    safe = Stage._redact_log(result.get('output'))
+                    instances = (host._parse_discovery(result['output'])
+                                 if result.get('success') else [])
+                    if not result.get('success'):
+                        message, detail = _('Discovery failed.'), safe
+                    elif not instances:
+                        message = _('No Odoo services were detected on %s.') % host.ip
+                        detail = safe
+                    else:
+                        c, u, r = host._sync_instances(instances)
+                        host.last_discovery = fields.Datetime.now()
+                        # Warm status + DB-list caches so the form is ready at once.
+                        for fn in (host._refresh_status, host._refresh_databases):
+                            try:
+                                fn()
+                            except Exception:  # noqa: BLE001
+                                _logger.exception("post-discovery refresh failed")
+                        ok = True
+                        message = _('🔍 Discovery complete: %(c)s created, %(u)s '
+                                    'updated, %(r)s removed.') % {'c': c, 'u': u, 'r': r}
+                    host.write({'op_state': 'done' if ok else 'failed',
+                                'op_time': fields.Datetime.now(),
+                                'op_detail': '' if ok else (detail or message)})
+                    Stage._send_op_bus(
+                        uid, ok, ('✅ %s' if ok else '❌ %s') % label,
+                        message, sticky=not ok)
+                    cr.commit()
+            except Exception as exc:  # noqa: BLE001 — report, never crash the thread
+                _logger.exception("Background discovery crashed for host %s", rec_id)
+                try:
+                    with odoo.registry(dbname).cursor() as cr:
+                        env = api.Environment(cr, uid, {})
+                        host = env['server.host'].browse(rec_id)
+                        if host.exists():
+                            host.sudo().write({
+                                'op_state': 'failed', 'op_time': fields.Datetime.now(),
+                                'op_detail': (str(exc) or repr(exc))[-2000:]})
+                        env['server.stage']._send_op_bus(
+                            uid, False, '❌ %s' % label,
+                            _('Discovery error: %s') % (str(exc)[-300:]), sticky=True)
+                        cr.commit()
+                except Exception:  # noqa: BLE001
+                    _logger.exception("discover failure notify failed")
 
-        created, updated, removed = self._sync_instances(instances)
-        self.last_discovery = fields.Datetime.now()
-        # Populate live status (parallel, ~1s) and the DB-list cache (one SSH)
-        # so the form and wizards are ready immediately, not after the next cron.
-        try:
-            self._refresh_status()
-        except Exception:
-            pass
-        try:
-            self._refresh_databases()
-        except Exception:
-            pass
-        return self.env['server.stage']._notify(
-            _('🔍 Discovery complete: %(c)s created, %(u)s updated, %(r)s removed.',
-              c=created, u=updated, r=removed)
-        )
+        import threading
+        threading.Thread(target=_worker, name='odoo-host-discover', daemon=True).start()
+        return self.env['server.stage']._op_started_toast(label)
 
     # ------------------------------------------------------------------
     # Discovery parsing

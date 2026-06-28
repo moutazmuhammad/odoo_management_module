@@ -48,24 +48,33 @@ def git(root, args, user):
     return run_as(user, "git -c safe.directory='*' -C %s %s" % (shlex.quote(root), args))
 
 
+# Per-run cache: repo URL -> [branch names]. Avoids repeating the (slow) ls-remote
+# for a repository shared by several instances on the same host.
+_BRANCH_CACHE = {}
+
+
 def repo_branches(root, user):
-    """All branch names for a repo. Prefer an authoritative remote listing (the
-    server's git remote usually has baked-in credentials, so `ls-remote` works for
-    private repos); fall back to the locally-known remote-tracking branches. This is
-    what lets the Pull wizard offer every branch, not just the checked-out one."""
+    """All branch names for a repo, so the Pull wizard can offer every branch — not
+    just the checked-out one.
+
+    FAST PATH: the locally-known remote-tracking branches (`git branch -r`) — no
+    network, and full clones already track every origin/* branch. Only if that is
+    empty (e.g. a shallow / single-branch clone) do we hit the network with a
+    bounded `ls-remote`. This keeps discovery fast (network calls per repo were the
+    slow part)."""
     names = []
-    out = run_as(user, "timeout 25 git -c safe.directory='*' -C %s ls-remote --heads "
-                       "origin" % shlex.quote(root))
-    for ln in (out or '').splitlines():
-        m = re.search(r'refs/heads/(.+)$', ln.strip())
-        if m:
-            names.append(m.group(1).strip())
-    if not names:  # offline / no creds — use what the last fetch recorded
-        for ln in (git(root, "branch -r", user) or '').splitlines():
-            ln = ln.strip()
-            if not ln or '->' in ln:
-                continue
-            names.append(re.sub(r'^[^/]+/', '', ln))
+    for ln in (git(root, "branch -r", user) or '').splitlines():
+        ln = ln.strip()
+        if not ln or '->' in ln:
+            continue
+        names.append(re.sub(r'^[^/]+/', '', ln))
+    if not names:  # shallow/single-branch clone — ask the remote (bounded)
+        out = run_as(user, "timeout 20 git -c safe.directory='*' -C %s ls-remote "
+                           "--heads origin" % shlex.quote(root))
+        for ln in (out or '').splitlines():
+            m = re.search(r'refs/heads/(.+)$', ln.strip())
+            if m:
+                names.append(m.group(1).strip())
     seen, res = set(), []
     for n in names:
         if n and n != 'HEAD' and n not in seen:
@@ -118,9 +127,15 @@ def find_repos(addons_path, user):
             url = clean_url(git(root, 'config --get remote.origin.url', user))
             if not url:
                 continue  # skip local-only repos with no remote
+            if is_official_odoo(url):
+                continue  # never a pull target — and skip its huge ls-remote
             branch = git(root, 'rev-parse --abbrev-ref HEAD', user)
+            # Cache branches per repo URL so a repo shared by several instances is
+            # listed once (ls-remote per repo is the slow part of discovery).
+            if url not in _BRANCH_CACHE:
+                _BRANCH_CACHE[url] = repo_branches(root, user)
             found[root] = {'path': root, 'url': url, 'branch': branch or '',
-                           'branches': repo_branches(root, user)}
+                           'branches': _BRANCH_CACHE[url]}
     return list(found.values())
 
 
