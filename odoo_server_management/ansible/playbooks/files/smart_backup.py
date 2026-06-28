@@ -539,7 +539,11 @@ def _size_targets(targets):
             continue
         seen.add(db)
         conn = _resolve_conn(db)
-        if not is_odoo_db(conn, db):
+        # The manager already chose WHAT to back up (every stage's DBs). Include any
+        # CONNECTABLE database here — a plain pg_dump works even if the DB has no
+        # Odoo tables yet (e.g. a raw/non-initialised DB). Only a DB we genuinely
+        # cannot reach is dropped (then the manager reports it).
+        if not _db_connectable(conn, db):
             continue
         fs = find_filestore(db)
         out.append({'db': db, 'domain': t.get('domain') or '', 'port': t.get('port') or '',
@@ -563,11 +567,24 @@ def detect(arg=()):
               + base64.b64encode(json.dumps(skipped).encode()).decode())
 
 
+def _db_connectable(conn, db):
+    """True if we can open `db` over this connection (whether or not it is an Odoo
+    DB) — used so raw/non-initialised DBs are still backed up via pg_dump."""
+    return conn.psql_scalar(db, 'SELECT 1') == '1'
+
+
 def _resolve_conn(db):
-    """Find the connection that can actually reach `db` (remote first)."""
+    """Find the connection that can actually reach `db` (remote first). Prefer a
+    connection where it is an Odoo DB, but fall back to any that can simply open it
+    so non-Odoo DBs are still dumpable."""
     srcs = list(_sources().values())
-    for s in [x for x in srcs if not x['conn'].local] + [x for x in srcs if x['conn'].local]:
+    ordered = ([x for x in srcs if not x['conn'].local]
+               + [x for x in srcs if x['conn'].local])
+    for s in ordered:
         if is_odoo_db(s['conn'], db):
+            return s['conn']
+    for s in ordered:
+        if _db_connectable(s['conn'], db):
             return s['conn']
     return Conn()
 
