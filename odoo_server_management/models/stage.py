@@ -158,6 +158,15 @@ class Stage(models.Model):
         except Exception:  # noqa: BLE001 — never break the form on a storage hiccup
             _logger.exception("Listing backups failed for stage %s", self.id)
 
+    def action_refresh_backups(self):
+        """Backups page button: re-list this stage's backups live from the object
+        Space so the (read-only) list shows the latest from the bucket on demand.
+        The web client reloads the record after the button, surfacing the new rows."""
+        self.ensure_one()
+        self._check_access(GROUP_USER)
+        self._load_backups()
+        return True
+
     def action_open_form(self):
         """Open this stage's full form (incl. the auto-loaded Backups page) from
         the host's inline instance list."""
@@ -389,15 +398,12 @@ class Stage(models.Model):
                                             'last_status_check': fields.Datetime.now()})
                 except Exception:  # noqa: BLE001 — never block the form on a probe
                     _logger.exception("Live status failed for stage %s", stage.id)
-                # Same open-hook: refresh this stage's backups list from storage so
-                # the Backups page is current every time the record is opened.
-                stage._load_backups()
             live[stage.id] = value
-        # Assign the computed field LAST — after every cache-invalidating side effect
-        # above (sudo().write + _load_backups' unlink/create on server.backup.file,
-        # which touches stage.backup_file_ids and invalidates the stage cache). If we
-        # assigned odoo_status_live before those, _load_backups stranded it and Odoo
-        # raised "Compute method failed to assign … odoo_status_live" (CacheMiss).
+        # Assign the computed field LAST — after the sudo().write above, which
+        # flushes/invalidates the stage cache. Assigning odoo_status_live before
+        # the write let it be stranded, raising "Compute method failed to assign …
+        # odoo_status_live" (CacheMiss). Backups are no longer loaded here — they
+        # refresh on demand via the Backups page "Refresh" button.
         for stage in self:
             stage.odoo_status_live = live.get(stage.id, stage.odoo_status or 'unknown')
 

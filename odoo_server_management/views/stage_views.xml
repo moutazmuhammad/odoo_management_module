@@ -102,8 +102,13 @@
                             </group>
                         </page>
                         <page string="Backups">
-                            <field name="backup_file_ids" readonly="1">
-                                <tree string="Stored Backups" create="false" edit="false" delete="false">
+                            <button name="action_refresh_backups" type="object"
+                                    string="Refresh List" class="btn-secondary"
+                                    icon="fa-refresh"
+                                    groups="odoo_server_management.group_user"/>
+                            <field name="backup_file_ids" readonly="1" nolabel="1">
+                                <tree string="Stored Backups" create="false" edit="false"
+                                      delete="false" editable="false">
                                     <field name="is_client" invisible="1"/>
                                     <field name="db"/>
                                     <field name="filename"/>
@@ -115,9 +120,10 @@
                                 </tree>
                             </field>
                             <div class="text-muted" style="font-size:12px;">
-                                Backups for this stage in the shared Space. Download gives a
-                                temporary link. For <b>Client Server</b> stages, only Operators
-                                and Admins may download.
+                                Read-only list of this stage's backups in the shared Space.
+                                Click <b>Refresh List</b> to fetch the latest from the bucket.
+                                Download gives a temporary link. For <b>Client Server</b> stages,
+                                only Operators and Admins may download.
                             </div>
                         </page>
                     </notebook>
