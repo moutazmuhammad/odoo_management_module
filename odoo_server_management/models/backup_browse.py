@@ -193,7 +193,9 @@ class BackupFile(models.TransientModel):
         cli = Storage._boto_client()
         bucket = Storage._bucket()
         pref = (prefix.strip('/') + '/') if prefix else ''
-        bases = ['%s%s/' % (pref, category), '%smanual/%s/' % (pref, category)]
+        # Only the DAILY backups area — manual backups are one-time downloads and
+        # are deliberately excluded from the stage's Backups list.
+        bases = ['%s%s/' % (pref, category)]
         vals = []
         for base in bases:
             token = None

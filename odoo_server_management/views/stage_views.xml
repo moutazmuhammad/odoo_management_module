@@ -122,20 +122,21 @@
                                     groups="odoo_server_management.group_user"/>
                             <field name="backup_file_ids" readonly="1" nolabel="1">
                                 <tree string="Stored Backups" create="false" edit="false"
-                                      delete="false" editable="false">
+                                      delete="false" editable="false"
+                                      default_order="db asc, last_modified desc">
                                     <field name="is_client" invisible="1"/>
-                                    <field name="db"/>
-                                    <field name="filename"/>
-                                    <field name="kind"/>
-                                    <field name="size_human"/>
-                                    <field name="last_modified"/>
+                                    <field name="db" string="Database"/>
+                                    <field name="last_modified" string="Created"/>
+                                    <field name="size_human" string="Size"/>
+                                    <field name="filename" string="File" optional="hide"/>
                                     <button name="action_download" type="object"
                                             string="Download" icon="fa-download" class="btn-link"/>
                                 </tree>
                             </field>
                             <div class="text-muted" style="font-size:12px;">
-                                Read-only list of this stage's backups in the shared Space.
-                                Click <b>Refresh List</b> to fetch the latest from the bucket.
+                                Daily backups for this stage, grouped by database and newest
+                                first (several days are kept per database). Manual backups are
+                                not shown here. Click <b>Refresh List</b> to fetch the latest.
                                 Download gives a temporary link. For <b>Client Server</b> stages,
                                 only Operators and Admins may download.
                             </div>
