@@ -86,44 +86,40 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         ext = 'dump' if self.backup_format == 'dump' else 'zip'
         key = Storage._object_key(
             ['manual', category, seg, '%s.%s' % (self.db_name, ext)])
-        try:
-            put_url = Storage._presign_put(key, ttl=3 * 3600)
-        except UserError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise UserError(_("Could not reach object storage: %s") % exc)
-
-        # Dump on the server and upload straight to the bucket via the pre-signed
-        # URL — no object-storage credentials touch the managed server.
-        inventory = stage._build_inventory()
+        # Capture plain values now (the wizard is transient and may be vacuumed
+        # before the background job runs).
+        db_name = self.db_name
+        backup_format = self.backup_format or 'zip'
+        filename = '%s.%s' % (db_name, ext)
+        url = self._detect_protocol(stage.name)
+        admin_password = stage.admin_password
         playbook = os.path.join(os.path.dirname(__file__),
                                 '../ansible/playbooks/backup_database.yml')
-        result = stage._run_ansible_playbook(playbook, inventory, {
-            'admin_password': stage.admin_password,
-            'url': self._detect_protocol(stage.name),
-            'database_name': self.db_name,
-            'backup_format': self.backup_format or 'zip',
-            'presigned_url': put_url,
-        }, timeout=3 * 3600)
-        if not result['success']:
-            raise UserError(_('❌ Failed to backup: %s') % result['output'])
 
-        filename = '%s.%s' % (self.db_name, ext)
-        try:
-            download_url = Storage._presign_get(key, filename=filename)
-        except Exception:  # noqa: BLE001
-            download_url = ''
-        # target 'self' + the attachment disposition makes the browser DOWNLOAD
-        # the file automatically — no popup to block, and Odoo stays open.
-        if download_url:
-            return {'type': 'ir.actions.act_url', 'url': download_url, 'target': 'self'}
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': _('Database Backup'),
-                'message': _('✅ Backup uploaded to %s.') % Storage._bucket(),
-                'type': 'success',
-                'sticky': False,
-            },
-        }
+        def work(stg):
+            St = stg.env['server.backup.storage']
+            try:
+                put_url = St._presign_put(key, ttl=3 * 3600)
+            except Exception as exc:  # noqa: BLE001
+                return {'ok': False, 'message': _("Could not reach object storage: %s") % exc}
+            # Dump on the server and upload straight to the bucket via the pre-signed
+            # URL — no object-storage credentials touch the managed server.
+            result = stg._run_ansible_playbook(playbook, stg._build_inventory(), {
+                'admin_password': admin_password,
+                'url': url,
+                'database_name': db_name,
+                'backup_format': backup_format,
+                'presigned_url': put_url,
+            }, timeout=3 * 3600)
+            if not result['success']:
+                return {'ok': False, 'message': result['output']}
+            try:
+                download_url = St._presign_get(key, filename=filename)
+            except Exception:  # noqa: BLE001
+                download_url = ''
+            # The presigned GET sets Content-Disposition attachment, so the frontend
+            # service triggers the download automatically when this arrives.
+            return {'ok': True, 'url': download_url,
+                    'message': _('✅ Backup of %s ready — downloading…') % db_name}
+
+        return stage._run_bg(_('Backup database %s') % db_name, work)

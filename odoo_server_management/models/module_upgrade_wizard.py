@@ -47,29 +47,26 @@ class UpgradeModuleWizard(models.TransientModel):
             raise UserError(_("This instance is missing the upgrade module path or "
                               "Odoo user. Run discovery or set them manually."))
 
-        inventory = stage._build_inventory()
-        playbook = os.path.join(os.path.dirname(__file__), '../ansible/playbooks/upgrade_module.yml')
+        # Capture plain values now (the wizard is transient and may be vacuumed before
+        # the background job runs).
+        database_name, module_name = self.database_name, self.module_name
+        playbook = os.path.join(os.path.dirname(__file__),
+                                '../ansible/playbooks/upgrade_module.yml')
 
-        extra_vars = {
-            'database_name': self.database_name,
-            'module_name': self.module_name,
-            'service_name': stage.service_name,
-            'upgrade_module_path': stage.upgrade_module_path,
-            'odoo_user': stage.odoo_user,
-        }
-
-        result = stage._run_ansible_playbook(playbook, inventory, extra_vars)
-
-        if result['success']:
-            stage.service_status = True
-            return {
-                'type': 'ir.actions.client',
-                'tag': 'display_notification',
-                'params': {
-                    'type': 'success',
-                    'message': _('✅ Module upgraded successfully'),
-                    'next': {'type': 'ir.actions.client', 'tag': 'reload'}
-                }
+        def work(stg):
+            extra_vars = {
+                'database_name': database_name,
+                'module_name': module_name,
+                'service_name': stg.service_name,
+                'upgrade_module_path': stg.upgrade_module_path,
+                'odoo_user': stg.odoo_user,
             }
-        else:
-            raise UserError(_('❌Failed to upgrade module: %s') % result['output'])
+            result = stg._run_ansible_playbook(playbook, stg._build_inventory(), extra_vars)
+            if result['success']:
+                stg.service_status = True
+                return {'ok': True, 'message': _('✅ Module %s upgraded on %s')
+                        % (module_name, database_name)}
+            return {'ok': False, 'message': result['output']}
+
+        return stage._run_bg(
+            _('Upgrade module %s (%s)') % (module_name, database_name), work)

@@ -134,6 +134,15 @@ class Stage(models.Model):
         [("running", "🟢 Running"), ("stopped", "🔴 Stopped"), ("unknown", "⚪ Not checked")],
         string="Status", readonly=True, compute='_compute_status_live')
     last_status_check = fields.Datetime(string="Last Status Check", readonly=True)
+    # Durable record of the last background action (start/stop/restart/pull/upgrade/
+    # backup) so its result/errors survive a reload. The live toast is pushed over
+    # the bus (see _run_bg); these fields are the persisted copy shown on the form.
+    op_label = fields.Char(string="Last Operation", readonly=True, copy=False)
+    op_state = fields.Selection(
+        [('running', '⏳ Running'), ('done', '✅ Success'), ('failed', '❌ Failed')],
+        string="Last Operation Result", readonly=True, copy=False)
+    op_time = fields.Datetime(string="Last Operation At", readonly=True, copy=False)
+    op_detail = fields.Text(string="Last Operation Details", readonly=True, copy=False)
     # Cached DB list (newline-separated), refreshed by a background cron every
     # 15 min so the backup/upgrade wizards open instantly without an SSH call.
     available_databases = fields.Text(string="Available Databases", readonly=True, copy=False)
@@ -423,6 +432,85 @@ class Stage(models.Model):
         return self._notify(
             _('🔄 Refreshing status in the background — reload in a moment.'))
 
+    # ===========================
+    # Background action runner (non-blocking actions with async result toasts)
+    # ===========================
+    def _op_started_toast(self, label):
+        """Immediate, non-reloading toast returned by every background action so the
+        button spinner clears at once (and a wizard modal closes). The real result
+        arrives later as a bus toast (see _run_bg)."""
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'type': 'info',
+                'title': _('Working…'),
+                'message': _('⏳ %s started — you will be notified when it finishes.')
+                           % label,
+                'sticky': False,
+            },
+        }
+
+    @api.model
+    def _send_op_bus(self, uid, ok, title, message, sticky=False, url=False, reload=False):
+        """Push one operation-result notification to the user's bus channel. The
+        frontend service (stage_ops.js) shows it as a toast, triggers the automatic
+        download when `url` is set, and refreshes the current view when `reload` is
+        set (so a start/stop/restart updates the status badge without a full reload)."""
+        self.env['bus.bus']._sendone(
+            'server_mgmt_ops_%d' % uid, 'server_mgmt_op',
+            {'ok': bool(ok), 'title': title or '', 'message': message or '',
+             'sticky': bool(sticky), 'url': url or False, 'reload': bool(reload)})
+
+    def _run_bg(self, label, work, reload=False):
+        """Run `work(stage)` in a BACKGROUND thread (own cursor) so the click returns
+        instantly and the page never blocks. `work` returns a dict
+        {'ok': bool, 'message': str, 'url': str?}; any exception is caught and
+        reported as a failure. The outcome is persisted on the stage (op_* fields)
+        AND pushed to the user as a bus toast (auto-download when 'url' is present).
+
+        Authorization MUST already have been checked by the caller (in the request,
+        as the real user) before calling this."""
+        self.ensure_one()
+        self.sudo().write({'op_label': label, 'op_state': 'running',
+                           'op_time': fields.Datetime.now(), 'op_detail': False})
+        stage_id, dbname, uid = self.id, self.env.cr.dbname, self.env.uid
+
+        def _worker():
+            import odoo
+            try:
+                with odoo.registry(dbname).cursor() as cr:
+                    env = api.Environment(cr, uid, {})
+                    stage = env['server.stage'].browse(stage_id)
+                    if not stage.exists():
+                        return
+                    try:
+                        res = work(stage.sudo()) or {}
+                        ok = bool(res.get('ok'))
+                        message = res.get('message') or (
+                            _('%s finished.') % label if ok else _('%s failed.') % label)
+                        url = res.get('url') or False
+                    except Exception as exc:  # noqa: BLE001 — report, never crash
+                        _logger.exception("Background op %r failed for stage %s",
+                                          label, stage_id)
+                        ok, url = False, False
+                        message = (str(exc) or repr(exc))[-1500:]
+                    stage.sudo().write({
+                        'op_state': 'done' if ok else 'failed',
+                        'op_time': fields.Datetime.now(),
+                        'op_detail': message})
+                    title = ('✅ %s' % label) if ok else ('❌ %s' % label)
+                    env['server.stage']._send_op_bus(
+                        uid, ok, title, message, sticky=not ok, url=url,
+                        reload=reload and ok)  # refresh the status badge on success
+                    cr.commit()
+            except Exception:  # noqa: BLE001 — a thread must never escape
+                _logger.exception("Background op thread crashed for stage %s", stage_id)
+
+        import threading
+        threading.Thread(target=_worker, name='odoo-stage-op', daemon=True).start()
+        return self._op_started_toast(label)
+
     @api.model
     def _cron_refresh_status(self):
         """Background job: refresh every instance's real (systemd) status over SSH,
@@ -538,6 +626,12 @@ class Stage(models.Model):
                 env = os.environ.copy()
                 kh = self._known_hosts_file()
                 env.update({
+                    # Force a UTF-8 locale so ansible never aborts with "could not
+                    # initialize the preferred locale" when the Odoo process happens
+                    # to run with an unset/degraded locale (e.g. under a background
+                    # thread or a sudo shell). C.UTF-8 is always present.
+                    'LC_ALL': 'C.UTF-8',
+                    'LANG': 'C.UTF-8',
                     'ANSIBLE_HOST_KEY_CHECKING': 'True',
                     'ANSIBLE_SSH_ARGS': f'-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={kh}',
                     # When a task drops to an unprivileged user (become_user: odoo)
@@ -708,47 +802,45 @@ class Stage(models.Model):
             'context': {'default_stage_id': self.id},
         }
 
+    def _service_action_work(self, playbook_file, ok_status, ok_message):
+        """Build a `work` closure (for _run_bg) that runs a service playbook and, on
+        success, writes the resulting service_status/odoo_status."""
+        playbook = os.path.join(os.path.dirname(__file__),
+                                '../ansible/playbooks/%s' % playbook_file)
+
+        def work(stage):
+            result = stage._run_ansible_playbook(
+                playbook, stage._build_inventory(),
+                {'service_name': stage.service_name})
+            if result['success']:
+                stage.write({
+                    'service_status': ok_status == 'running',
+                    'odoo_status': ok_status,
+                    'last_status_check': fields.Datetime.now()})
+                return {'ok': True, 'message': ok_message}
+            return {'ok': False, 'message': result['output']}
+        return work
+
     def action_restart_service(self):
         self._check_action_access()
-        self = self.sudo()
         self.ensure_one()
-        inventory = self._build_inventory()
-        playbook = os.path.join(os.path.dirname(__file__), '../ansible/playbooks/restart_service.yml')
-
-        result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
-        if result['success']:
-            self.write({'service_status': True, 'odoo_status': 'running',
-                        'last_status_check': fields.Datetime.now()})
-            return self._notify(_('🔁Service restarted successfully'))
-        raise UserError(_('❌Failed to restart service: %s') % result['output'])
+        return self.sudo()._run_bg(_('Restart service'), self._service_action_work(
+            'restart_service.yml', 'running', _('🔁 Service restarted successfully')),
+            reload=True)
 
     def action_stop_service(self):
         self._check_action_access()
-        self = self.sudo()
         self.ensure_one()
-        inventory = self._build_inventory()
-        playbook = os.path.join(os.path.dirname(__file__), '../ansible/playbooks/stop_service.yml')
-
-        result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
-        if result['success']:
-            self.write({'service_status': False, 'odoo_status': 'stopped',
-                        'last_status_check': fields.Datetime.now()})
-            return self._notify(_('🛑Service stopped successfully'))
-        raise UserError(_('❌Failed to stop service: %s') % result['output'])
+        return self.sudo()._run_bg(_('Stop service'), self._service_action_work(
+            'stop_service.yml', 'stopped', _('🛑 Service stopped successfully')),
+            reload=True)
 
     def action_start_service(self):
         self._check_action_access()
-        self = self.sudo()
         self.ensure_one()
-        inventory = self._build_inventory()
-        playbook = os.path.join(os.path.dirname(__file__), '../ansible/playbooks/start_service.yml')
-
-        result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
-        if result['success']:
-            self.write({'service_status': True, 'odoo_status': 'running',
-                        'last_status_check': fields.Datetime.now()})
-            return self._notify(_('🟢Service started successfully'))
-        raise UserError(_('❌Failed to start service: %s') % result['output'])
+        return self.sudo()._run_bg(_('Start service'), self._service_action_work(
+            'start_service.yml', 'running', _('🟢 Service started successfully')),
+            reload=True)
 
     def action_backup_database(self):
         self._check_action_access()

@@ -64,6 +64,13 @@
                                groups="odoo_server_management.group_devops"/>
                         <field name="notes"/>
                     </group>
+                    <group string="Last Operation" attrs="{'invisible': [('op_state', '=', False)]}">
+                        <field name="op_label" readonly="1"/>
+                        <field name="op_state" readonly="1"/>
+                        <field name="op_time" readonly="1"/>
+                        <field name="op_detail" readonly="1"
+                               attrs="{'invisible': [('op_detail', '=', False)]}"/>
+                    </group>
                     <notebook>
                         <page string="General Info" groups="odoo_server_management.group_devops">
                             <group>
