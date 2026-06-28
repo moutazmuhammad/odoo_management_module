@@ -127,8 +127,9 @@ class Stage(models.Model):
         [("running", "🟢 Running"), ("stopped", "🔴 Stopped"), ("unknown", "⚪ Not checked")],
         string="Odoo Status", default='unknown', readonly=True, copy=False,
     )
-    # Live status shown on the form — computed (SSH systemctl) on every open, so it
-    # always reflects reality; it also syncs the stored odoo_status above.
+    # Status shown on the form. Mirrors the stored odoo_status (kept current by the
+    # 5-min cron and the "Check Status" button) — it does NOT probe over SSH on open,
+    # so the form loads instantly. Press "Check Status" for a live refresh.
     odoo_status_live = fields.Selection(
         [("running", "🟢 Running"), ("stopped", "🔴 Stopped"), ("unknown", "⚪ Not checked")],
         string="Status", readonly=True, compute='_compute_status_live')
@@ -142,9 +143,9 @@ class Stage(models.Model):
     available_modules = fields.Text(string="Available Modules", readonly=True, copy=False)
 
     # Stored backups for this stage — REAL transient rows (a regular One2many, so
-    # the form renders them reliably). They are (re)listed from the object Space
-    # every time the record is opened, by _load_backups() (called from the status
-    # open-hook and from action_open_form).
+    # the form renders them reliably). They are (re)listed from the object Space on
+    # demand by _load_backups(), triggered by the Backups page "Refresh List" button
+    # (action_refresh_backups) — never on open, so the form stays fast.
     backup_file_ids = fields.One2many(
         'server.backup.file', 'stage_id', string='Stored Backups')
 
@@ -168,10 +169,10 @@ class Stage(models.Model):
         return True
 
     def action_open_form(self):
-        """Open this stage's full form (incl. the auto-loaded Backups page) from
-        the host's inline instance list."""
+        """Open this stage's full form from the host's inline instance list. Kept
+        light (no SSH/S3 on open) so it is instant — status refreshes via the 5-min
+        cron / 'Check Status' button, and backups via the Backups 'Refresh List'."""
         self.ensure_one()
-        self._load_backups()
         return {
             'type': 'ir.actions.act_window',
             'name': self.name or _('Stage'),
@@ -379,33 +380,24 @@ class Stage(models.Model):
     _STATUS_TIMEOUT = 3
 
     def _compute_status_live(self):
-        """Live status shown on the stage form: query the REAL systemd status over
-        SSH every time the record is opened, and keep the stored odoo_status in
-        sync so the list reflects it too."""
-        live = {}
+        """Mirror the stored odoo_status onto the form field — NO SSH probe, so the
+        form opens instantly. The stored status is kept current by the 5-min cron
+        (_cron_refresh_status) and refreshed on demand by action_check_status."""
         for stage in self:
-            value = stage.odoo_status or 'unknown'
-            if stage.id and stage.host_id and stage.service_name:
-                try:
-                    statuses = stage.host_id._service_statuses(stage)
-                    v = statuses.get(stage.service_name)
-                    if v in ('active', 'activating'):
-                        value = 'running'
-                    elif v:
-                        value = 'stopped'
-                    if value != stage.odoo_status:
-                        stage.sudo().write({'odoo_status': value,
-                                            'last_status_check': fields.Datetime.now()})
-                except Exception:  # noqa: BLE001 — never block the form on a probe
-                    _logger.exception("Live status failed for stage %s", stage.id)
-            live[stage.id] = value
-        # Assign the computed field LAST — after the sudo().write above, which
-        # flushes/invalidates the stage cache. Assigning odoo_status_live before
-        # the write let it be stranded, raising "Compute method failed to assign …
-        # odoo_status_live" (CacheMiss). Backups are no longer loaded here — they
-        # refresh on demand via the Backups page "Refresh" button.
-        for stage in self:
-            stage.odoo_status_live = live.get(stage.id, stage.odoo_status or 'unknown')
+            stage.odoo_status_live = stage.odoo_status or 'unknown'
+
+    def action_check_status(self):
+        """Status button: probe the REAL systemd status over SSH for THIS stage on
+        demand and store it. The web client reloads the record afterwards, so the
+        status updates in place. (Kept off the open path so opening stays fast.)"""
+        self.ensure_one()
+        self._check_access(GROUP_USER)
+        if self.host_id and self.service_name:
+            try:
+                self.host_id._refresh_status(self)
+            except Exception:  # noqa: BLE001 — surface nothing scary on a probe hiccup
+                _logger.exception("Live status check failed for stage %s", self.id)
+        return True
 
     @api.model
     def _cron_refresh_status(self):
