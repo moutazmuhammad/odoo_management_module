@@ -20,10 +20,11 @@ class BackupFile(models.TransientModel):
     """
     _name = 'server.backup.file'
     _description = 'Stored Backup File'
-    _order = 'category, server_seg, db, last_modified desc'
+    _order = 'category, server_name, server_seg, db, last_modified desc'
 
     category = fields.Char(string='Category', readonly=True)
-    server_seg = fields.Char(string='Server (IP/Domain)', readonly=True)
+    server_name = fields.Char(string='Server', readonly=True)
+    server_seg = fields.Char(string='Instance (IP/Domain)', readonly=True)
     db = fields.Char(string='Database', readonly=True)
     filename = fields.Char(string='File', readonly=True)
     key = fields.Char(string='Object Key', readonly=True)
@@ -102,12 +103,19 @@ class BackupFile(models.TransientModel):
         if parts[0] == 'manual':
             if len(parts) < 4:
                 return None
-            return {'category': parts[1], 'server_seg': parts[2],
+            return {'category': parts[1], 'server_name': '', 'server_seg': parts[2],
                     'db': parts[-1].rsplit('.', 1)[0], 'filename': parts[-1],
                     'kind': 'manual'}
+        # Daily layout (length-agnostic so both are read):
+        #   new:    <category>/<server>/<domain>/<db>/<db>_<date>.zip   (>= 5 parts)
+        #   legacy: <category>/<domain>/<db>/<db>_<date>.zip            (== 4 parts)
+        # db is always parts[-2], filename parts[-1], domain parts[-3]; the server
+        # name segment exists only in the new layout (parts[1]).
         if len(parts) < 4:
             return None
-        return {'category': parts[0], 'server_seg': parts[1], 'db': parts[2],
+        return {'category': parts[0],
+                'server_name': parts[1] if len(parts) >= 5 else '',
+                'server_seg': parts[-3], 'db': parts[-2],
                 'filename': parts[-1], 'kind': 'daily'}
 
     # ------------------------------------------------------------------

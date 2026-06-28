@@ -57,12 +57,13 @@ class ServerHost(models.Model):
     last_discovery = fields.Datetime(string='Last Discovery', readonly=True)
     # All servers back up to the single shared Space (configured globally in
     # General Settings). This selection becomes the top-level folder in the
-    # bucket, so backups land under <bucket>/<category>/<ip-or-domain>/<db>/.
+    # bucket, so backups land under
+    # <bucket>/<category>/<server>/<ip-or-domain>/<db>/.
     backup_category = fields.Selection(
         [('odex', 'Odex'), ('erp', 'ERP')],
         string='Backup Category', required=True, default='odex',
         help="Top-level folder for this server's backups in the shared Space: "
-             "<bucket>/<category>/<ip-or-domain>/<db>/<db>_<date>.zip.")
+             "<bucket>/<category>/<server>/<ip-or-domain>/<db>/<db>_<date>.zip.")
     backup_extra_dbs = fields.Text(
         string='Additional Databases to Back Up', groups=GROUP_DEVOPS,
         help="Exact database names (comma- or newline-separated) to ALWAYS back "
@@ -291,6 +292,14 @@ class ServerHost(models.Model):
     _BACKUP_SINGLE_LIMIT = 4 * 1024 ** 3
     _BACKUP_PART_SIZE = 512 * 1024 ** 2
 
+    def _backup_server_seg(self):
+        """Path segment identifying THIS server inside a backup key — a slug of the
+        server's name (so keys read <category>/<server>/<domain>/<db>/...). Falls
+        back to the dashed IP if the name is empty."""
+        self.ensure_one()
+        slug = re.sub(r'[^a-z0-9.\-]+', '-', (self.name or '').strip().lower()).strip('-')
+        return slug or (self.ip or '').replace('.', '-')
+
     def _run_daily_backup(self, project=None, only_dbs=None):
         """Detect every DB on this host and upload each to the shared Space
         (single or multipart, pre-signed — keys never leave Odoo), then prune old
@@ -335,17 +344,21 @@ class ServerHost(models.Model):
         category = self.backup_category or 'odex'
         day = fields.Date.to_string(fields.Date.context_today(self))
         ip_seg = (self.ip or '').replace('.', '-')
+        server_seg = self._backup_server_seg()
         ok = 0
         for it in items:
             try:
-                if self._backup_one_db(Storage, it, category, day, ip_seg):
+                if self._backup_one_db(Storage, it, category, day, ip_seg, server_seg):
                     ok += 1
             except Exception:
                 _logger.exception("Backup errored for %s/%s",
                                   self.name, it.get('db'))
 
-        # 3. Prune old daily objects for this server (scoped to its folders).
+        # 3. Prune old daily objects for this server. The server folder now covers
+        #    every instance/db under it; the legacy (no-server-name) folders are
+        #    also pruned so pre-change backups age out under the old layout.
         try:
+            Storage._prune(Storage._object_key([category, server_seg]) + '/')
             Storage._prune(Storage._object_key([category, ip_seg]) + '/')
             for dom in {it.get('domain') for it in items if it.get('domain')}:
                 Storage._prune(Storage._object_key([category, dom]) + '/')
@@ -357,7 +370,7 @@ class ServerHost(models.Model):
                      self.name, ok, len(items), Storage._bucket())
         return ok
 
-    def _backup_one_db(self, Storage, it, category, day, ip_seg):
+    def _backup_one_db(self, Storage, it, category, day, ip_seg, server_seg):
         """Build + upload ONE database in its own ansible run (own timeout).
         Completes/aborts its multipart upload. Returns True on success."""
         self.ensure_one()
@@ -365,7 +378,8 @@ class ServerHost(models.Model):
         if not db:
             return False
         seg = it.get('domain') or ip_seg
-        key = Storage._object_key([category, seg, db, '%s_%s.zip' % (db, day)])
+        key = Storage._object_key(
+            [category, server_seg, seg, db, '%s_%s.zip' % (db, day)])
         size = int(it.get('size') or 0)
         fs = it.get('filestore') or ''
         mp = None

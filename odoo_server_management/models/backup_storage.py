@@ -17,8 +17,8 @@ class BackupStorage(models.AbstractModel):
     short-lived pre-signed URL minted here, so the access/secret keys never leave
     Odoo and are never stored on the managed servers. The object key layout is:
 
-        <prefix?>/<category>/<ip-or-domain>/<db>/<db>_<date>.zip   (daily)
-        <prefix?>/manual/<category>/<ip-or-domain>/<db>.<ext>      (real-time)
+        <prefix?>/<category>/<server>/<ip-or-domain>/<db>/<db>_<date>.zip  (daily)
+        <prefix?>/manual/<category>/<ip-or-domain>/<db>.<ext>             (real-time)
     """
     _name = 'server.backup.storage'
     _description = 'Backup Storage (global object-storage target)'
