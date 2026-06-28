@@ -713,11 +713,18 @@ class ServerHost(models.Model):
             repo = Repo.search([('url', '=', url)], limit=1)
             if not repo:
                 repo = Repo.create({'name': self._repo_name_from_url(url), 'url': url})
-            branch = Branch.search([
-                ('repository_id', '=', repo.id), ('name', '=', branch_name),
-            ], limit=1)
-            if not branch:
-                branch = Branch.create({'name': branch_name, 'repository_id': repo.id})
+            # Register EVERY branch discovered on the remote (not just the checked-out
+            # one) so the Pull wizard can offer them all. The current branch is always
+            # included so the path link below resolves even if the listing was empty.
+            all_names = list(dict.fromkeys(
+                [branch_name] + [b.strip() for b in (r.get('branches') or []) if b.strip()]))
+            existing = {b.name: b
+                        for b in Branch.search([('repository_id', '=', repo.id)])}
+            for bn in all_names:
+                if bn and bn not in existing:
+                    existing[bn] = Branch.create({'name': bn, 'repository_id': repo.id})
+            branch = existing.get(branch_name) or Branch.create(
+                {'name': branch_name, 'repository_id': repo.id})
             link = Path.search([
                 ('stage_id', '=', stage.id), ('repository_id', '=', repo.id),
                 ('pull_path', '=', path),

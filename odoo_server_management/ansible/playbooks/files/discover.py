@@ -48,6 +48,32 @@ def git(root, args, user):
     return run_as(user, "git -c safe.directory='*' -C %s %s" % (shlex.quote(root), args))
 
 
+def repo_branches(root, user):
+    """All branch names for a repo. Prefer an authoritative remote listing (the
+    server's git remote usually has baked-in credentials, so `ls-remote` works for
+    private repos); fall back to the locally-known remote-tracking branches. This is
+    what lets the Pull wizard offer every branch, not just the checked-out one."""
+    names = []
+    out = run_as(user, "timeout 25 git -c safe.directory='*' -C %s ls-remote --heads "
+                       "origin" % shlex.quote(root))
+    for ln in (out or '').splitlines():
+        m = re.search(r'refs/heads/(.+)$', ln.strip())
+        if m:
+            names.append(m.group(1).strip())
+    if not names:  # offline / no creds — use what the last fetch recorded
+        for ln in (git(root, "branch -r", user) or '').splitlines():
+            ln = ln.strip()
+            if not ln or '->' in ln:
+                continue
+            names.append(re.sub(r'^[^/]+/', '', ln))
+    seen, res = set(), []
+    for n in names:
+        if n and n != 'HEAD' and n not in seen:
+            seen.add(n)
+            res.append(n)
+    return res
+
+
 def is_official_odoo(url):
     """True for the official Odoo org repos (odoo/odoo, odoo/enterprise, ...) —
     the framework source, which is never a pull target here."""
@@ -93,7 +119,8 @@ def find_repos(addons_path, user):
             if not url:
                 continue  # skip local-only repos with no remote
             branch = git(root, 'rev-parse --abbrev-ref HEAD', user)
-            found[root] = {'path': root, 'url': url, 'branch': branch or ''}
+            found[root] = {'path': root, 'url': url, 'branch': branch or '',
+                           'branches': repo_branches(root, user)}
     return list(found.values())
 
 

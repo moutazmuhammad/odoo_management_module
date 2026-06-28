@@ -1,6 +1,6 @@
 import os
 import re
-from odoo import models, fields, _
+from odoo import models, fields, api, _
 from odoo.exceptions import UserError
 
 from .stage import GROUP_USER
@@ -26,10 +26,22 @@ class PullCodeWizard(models.TransientModel):
     stage_id = fields.Many2one('server.stage', string='Stage', required=True, readonly=True)
     repo_branch_path_id = fields.Many2one(
         'server.stage.repo.branch.path',
-        string='Repository & Branch',
+        string='Repository & Path',
         required=True,
         domain="[('stage_id', '=', stage_id)]"
     )
+    repository_id = fields.Many2one(
+        'server.repository', related='repo_branch_path_id.repository_id', readonly=True)
+    # Pick ANY branch of the selected repository (discovery records them all), not
+    # just the one currently checked out on the server.
+    branch_id = fields.Many2one(
+        'server.repository.branch', string='Branch',
+        domain="[('repository_id', '=', repository_id)]")
+
+    @api.onchange('repo_branch_path_id')
+    def _onchange_repo_branch_path_id(self):
+        # Default the branch to the one currently deployed at this path.
+        self.branch_id = self.repo_branch_path_id.branch_id
 
     def action_confirm_pull(self):
         self.stage_id._check_action_access()
@@ -37,7 +49,8 @@ class PullCodeWizard(models.TransientModel):
         self.ensure_one()
         stage = self.stage_id
         repo = self.repo_branch_path_id.repository_id
-        branch = self.repo_branch_path_id.branch_id.name
+        # The user-chosen branch wins; fall back to the path's current branch.
+        branch = (self.branch_id.name or self.repo_branch_path_id.branch_id.name)
         path = self.repo_branch_path_id.pull_path
         if not stage.odoo_user:
             raise UserError(_("This instance has no Odoo user set, so a pull would "
