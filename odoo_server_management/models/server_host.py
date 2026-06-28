@@ -460,17 +460,70 @@ class ServerHost(models.Model):
         return False
 
     def action_run_backup_now(self):
-        """Manually run the full backup for this server right now (bypasses the
-        once-per-day / night-hour guards)."""
+        """Manually run the full backup for this server in the BACKGROUND (bypasses
+        the once-per-day / night-hour guards).
+
+        Dumping + uploading every database can take many minutes; running it inline
+        risked an HTTP timeout / lost-connection error. So the click returns
+        immediately and the work runs in a worker thread that pushes the result
+        (count, or the error) to the user as a bus toast and persists it on the host
+        (op_* fields)."""
         self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         if not self.env['server.backup.storage']._keys_set():
             raise UserError(_(
                 "Backup storage is not configured. Set the bucket and keys in "
                 "Server Management → General Settings → Backups."))
-        n = self._run_daily_backup()
-        return self.env['server.stage']._notify(
-            _("✅ Backup complete: %s database(s) uploaded for %s.") % (n, self.name))
+        self.sudo().write({'op_label': _('Run backup'), 'op_state': 'running',
+                           'op_time': fields.Datetime.now(), 'op_detail': False})
+        rec_id, dbname, uid = self.id, self.env.cr.dbname, self.env.uid
+        label = _('Run backup')
+
+        def _worker():
+            import odoo
+            ok, message, detail = False, '', ''
+            try:
+                with odoo.registry(dbname).cursor() as cr:
+                    env = api.Environment(cr, uid, {})
+                    host = env['server.host'].browse(rec_id).sudo()
+                    if not host.exists():
+                        return
+                    try:
+                        n = host._run_daily_backup()
+                        ok = True
+                        message = _("✅ Backup complete: %(n)s database(s) uploaded "
+                                    "for %(s)s.") % {'n': n, 's': host.name}
+                    except Exception as exc:  # noqa: BLE001 — report, never crash
+                        _logger.exception("Manual backup failed for host %s", rec_id)
+                        message = _("Backup failed.")
+                        detail = (str(exc) or repr(exc))[-2000:]
+                    host.write({'op_state': 'done' if ok else 'failed',
+                                'op_time': fields.Datetime.now(),
+                                'op_detail': '' if ok else (detail or message)})
+                    env['server.stage']._send_op_bus(
+                        uid, ok, ('✅ %s' if ok else '❌ %s') % label,
+                        message, sticky=not ok)
+                    cr.commit()
+            except Exception as exc:  # noqa: BLE001
+                _logger.exception("Manual backup thread crashed for host %s", rec_id)
+                try:
+                    with odoo.registry(dbname).cursor() as cr:
+                        env = api.Environment(cr, uid, {})
+                        host = env['server.host'].browse(rec_id)
+                        if host.exists():
+                            host.sudo().write({
+                                'op_state': 'failed', 'op_time': fields.Datetime.now(),
+                                'op_detail': (str(exc) or repr(exc))[-2000:]})
+                        env['server.stage']._send_op_bus(
+                            uid, False, '❌ %s' % label,
+                            _('Backup error: %s') % (str(exc)[-300:]), sticky=True)
+                        cr.commit()
+                except Exception:  # noqa: BLE001
+                    _logger.exception("manual backup failure notify failed")
+
+        import threading
+        threading.Thread(target=_worker, name='odoo-host-backup', daemon=True).start()
+        return self.env['server.stage']._op_started_toast(label)
 
     def _ensure_agent_token(self):
         # Read AND write via sudo: agent_token is an admin-only field, so reading
