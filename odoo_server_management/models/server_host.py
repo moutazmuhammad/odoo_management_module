@@ -591,62 +591,89 @@ class ServerHost(models.Model):
         rec_id, dbname, uid = self.id, self.env.cr.dbname, self.env.uid
         label = _('Discover server')
 
-        def _worker():
+        def _mark_failed(message, detail):
             import odoo
-            ok, message, detail = False, '', ''
+            try:
+                with odoo.registry(dbname).cursor() as cr:
+                    env = api.Environment(cr, uid, {})
+                    host = env['server.host'].browse(rec_id)
+                    if host.exists():
+                        host.sudo().write({
+                            'op_state': 'failed', 'op_time': fields.Datetime.now(),
+                            'op_detail': (detail or message or '')[-2000:]})
+                    env['server.stage']._send_op_bus(
+                        uid, False, '❌ %s' % label, message, sticky=True)
+                    cr.commit()
+            except Exception:  # noqa: BLE001
+                _logger.exception("discover failure notify failed")
+
+        def _worker():
+            import time as _time
+            import odoo
+            # Phase 1 — run discovery (ansible) ONCE and parse it. No DB writes here
+            # (the cursor is rolled back), so a phase-2 retry never re-runs ansible.
+            instances = None
             try:
                 with odoo.registry(dbname).cursor() as cr:
                     env = api.Environment(cr, uid, {})
                     host = env['server.host'].browse(rec_id).sudo()
                     if not host.exists():
                         return
-                    Stage = env['server.stage']
                     result = host._run('discover_server.yml')
-                    # The raw output can embed the discovery payload (master pwd) —
-                    # redact before showing it.
-                    safe = Stage._redact_log(result.get('output'))
-                    instances = (host._parse_discovery(result['output'])
-                                 if result.get('success') else [])
-                    if not result.get('success'):
-                        message, detail = _('Discovery failed.'), safe
-                    elif not instances:
-                        message = _('No Odoo services were detected on %s.') % host.ip
-                        detail = safe
-                    else:
-                        c, u, r = host._sync_instances(instances)
-                        host.last_discovery = fields.Datetime.now()
-                        # Warm status + DB-list caches so the form is ready at once.
-                        for fn in (host._refresh_status, host._refresh_databases):
-                            try:
-                                fn()
-                            except Exception:  # noqa: BLE001
-                                _logger.exception("post-discovery refresh failed")
-                        ok = True
-                        message = _('🔍 Discovery complete: %(c)s created, %(u)s '
-                                    'updated, %(r)s removed.') % {'c': c, 'u': u, 'r': r}
-                    host.write({'op_state': 'done' if ok else 'failed',
-                                'op_time': fields.Datetime.now(),
-                                'op_detail': '' if ok else (detail or message)})
-                    Stage._send_op_bus(
-                        uid, ok, ('✅ %s' if ok else '❌ %s') % label,
-                        message, sticky=not ok)
-                    cr.commit()
-            except Exception as exc:  # noqa: BLE001 — report, never crash the thread
-                _logger.exception("Background discovery crashed for host %s", rec_id)
+                    safe = env['server.stage']._redact_log(result.get('output'))
+                    parsed = (host._parse_discovery(result['output'])
+                              if result.get('success') else [])
+                    cr.rollback()
+                if not result.get('success'):
+                    return _mark_failed(_('Discovery failed.'), safe)
+                if not parsed:
+                    return _mark_failed(
+                        _('No Odoo services were detected on this server.'), safe)
+                instances = parsed
+            except Exception as exc:  # noqa: BLE001
+                _logger.exception("Discovery (phase 1) crashed for host %s", rec_id)
+                return _mark_failed(_('Discovery error'), (str(exc) or repr(exc))[-2000:])
+
+            # Phase 2 — persist the sync, RETRYING on a concurrent-update serialization
+            # error (the 5-min status cron writes the same stage rows; REPEATABLE READ
+            # then raises "could not serialize access due to concurrent update").
+            for attempt in range(5):
                 try:
                     with odoo.registry(dbname).cursor() as cr:
                         env = api.Environment(cr, uid, {})
-                        host = env['server.host'].browse(rec_id)
-                        if host.exists():
-                            host.sudo().write({
-                                'op_state': 'failed', 'op_time': fields.Datetime.now(),
-                                'op_detail': (str(exc) or repr(exc))[-2000:]})
+                        host = env['server.host'].browse(rec_id).sudo()
+                        if not host.exists():
+                            return
+                        c, u, r = host._sync_instances(instances)
+                        host.last_discovery = fields.Datetime.now()
+                        host.write({'op_state': 'done', 'op_time': fields.Datetime.now(),
+                                    'op_detail': ''})
                         env['server.stage']._send_op_bus(
-                            uid, False, '❌ %s' % label,
-                            _('Discovery error: %s') % (str(exc)[-300:]), sticky=True)
+                            uid, True, '✅ %s' % label,
+                            _('🔍 Discovery complete: %(c)s created, %(u)s updated, '
+                              '%(r)s removed.') % {'c': c, 'u': u, 'r': r})
                         cr.commit()
+                    break
+                except Exception as exc:  # noqa: BLE001 — serialization/lock conflict
+                    _logger.warning("Discovery sync attempt %s for host %s failed: %s",
+                                    attempt + 1, rec_id, exc)
+                    if attempt == 4:
+                        return _mark_failed(_('Discovery error'),
+                                            (str(exc) or repr(exc))[-2000:])
+                    _time.sleep(0.5 * (attempt + 1))
+
+            # Warm status + DB-list caches AFTER the sync is safely committed (its own
+            # short transactions, best-effort — never block or fail the discovery).
+            for fn_name in ('_refresh_status', '_refresh_databases'):
+                try:
+                    with odoo.registry(dbname).cursor() as cr:
+                        env = api.Environment(cr, uid, {})
+                        host = env['server.host'].browse(rec_id).sudo()
+                        if host.exists():
+                            getattr(host, fn_name)()
+                            cr.commit()
                 except Exception:  # noqa: BLE001
-                    _logger.exception("discover failure notify failed")
+                    _logger.exception("post-discovery %s failed", fn_name)
 
         import threading
         threading.Thread(target=_worker, name='odoo-host-discover', daemon=True).start()
