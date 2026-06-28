@@ -48,6 +48,7 @@ class BackupAgentController(http.Controller):
             return {'error': 'storage not configured'}
         category = host.backup_category or 'odex'
         ip_seg = (host.ip or '').replace('.', '-')
+        server_seg = host._backup_server_seg()
         day = fields.Date.to_string(fields.Date.context_today(host))
         ICP = request.env['ir.config_parameter'].sudo()
         try:
@@ -64,7 +65,9 @@ class BackupAgentController(http.Controller):
             if not db or not SAFE.match(db):
                 continue
             seg = _sanitize_seg(d.get('domain')) or ip_seg
-            key = Storage._object_key([category, seg, db, '%s_%s.zip' % (db, day)])
+            # <category>/<server>/<domain-or-ip>/<db>/<db>_<date>.zip
+            key = Storage._object_key(
+                [category, server_seg, seg, db, '%s_%s.zip' % (db, day)])
             size = int(d.get('size') or 0)
             try:
                 if size < single_limit:
@@ -114,6 +117,9 @@ class BackupAgentController(http.Controller):
             category = host.backup_category or 'odex'
             ip_seg = (host.ip or '').replace('.', '-')
             try:
+                # Server folder covers every instance/db; the legacy (no-server-name)
+                # IP folder is also pruned so pre-change backups age out.
+                Storage._prune(Storage._object_key([category, host._backup_server_seg()]) + '/')
                 Storage._prune(Storage._object_key([category, ip_seg]) + '/')
             except Exception:  # noqa: BLE001
                 _logger.exception("agent prune failed for host %s", host.name)
