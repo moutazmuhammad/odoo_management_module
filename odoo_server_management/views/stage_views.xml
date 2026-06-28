@@ -147,6 +147,9 @@
                 <field name="needs_review" readonly="1"/>
                 <field name="client_stage" widget="boolean_toggle" readonly="1"
                        groups="odoo_server_management.group_devops"/>
+                <button name="action_check_status" type="object"
+                        string="Check Status" icon="fa-refresh"
+                        groups="odoo_server_management.group_user"/>
             </tree>
         </field>
     </record>

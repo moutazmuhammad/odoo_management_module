@@ -387,17 +387,41 @@ class Stage(models.Model):
             stage.odoo_status_live = stage.odoo_status or 'unknown'
 
     def action_check_status(self):
-        """Status button: probe the REAL systemd status over SSH for THIS stage on
-        demand and store it. The web client reloads the record afterwards, so the
-        status updates in place. (Kept off the open path so opening stays fast.)"""
-        self.ensure_one()
+        """Per-stage button: refresh the REAL systemd status over SSH on demand.
+
+        The SSH probe runs in a BACKGROUND thread (its own cursor), so the click
+        returns immediately and the UI never blocks/loads. The stored status is
+        updated within a moment — reload to see it (the 5-min cron also refreshes
+        it). Works for one row or a multi-selection."""
         self._check_access(GROUP_USER)
-        if self.host_id and self.service_name:
+        stage_ids = [s.id for s in self if s.host_id and s.service_name]
+        if not stage_ids:
+            return True
+        dbname, uid = self.env.cr.dbname, self.env.uid
+
+        def _worker():
+            import odoo
             try:
-                self.host_id._refresh_status(self)
-            except Exception:  # noqa: BLE001 — surface nothing scary on a probe hiccup
-                _logger.exception("Live status check failed for stage %s", self.id)
-        return True
+                with odoo.registry(dbname).cursor() as cr:
+                    env = api.Environment(cr, uid, {})
+                    stages = env['server.stage'].browse(stage_ids).exists()
+                    for host in stages.mapped('host_id'):
+                        hstages = stages.filtered(lambda s: s.host_id == host)
+                        try:
+                            host._refresh_status(hstages)
+                            cr.commit()
+                        except Exception:  # noqa: BLE001
+                            cr.rollback()
+                            _logger.exception(
+                                "Background status check failed for host %s", host.id)
+            except Exception:  # noqa: BLE001 — a thread must never crash the worker
+                _logger.exception("Background status check thread failed")
+
+        import threading
+        threading.Thread(target=_worker, name='odoo-stage-status',
+                         daemon=True).start()
+        return self._notify(
+            _('🔄 Refreshing status in the background — reload in a moment.'))
 
     @api.model
     def _cron_refresh_status(self):

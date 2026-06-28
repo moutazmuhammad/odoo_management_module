@@ -64,6 +64,9 @@
                                     <field name="needs_review" readonly="1"/>
                                     <field name="odoo_status" readonly="1"/>
                                     <field name="auto_stop"/>
+                                    <button name="action_check_status" type="object"
+                                            string="Check Status" icon="fa-refresh"
+                                            groups="odoo_server_management.group_user"/>
                                     <button name="action_open_form" type="object"
                                             string="Open / Backups" icon="fa-folder-open-o"/>
                                 </tree>
