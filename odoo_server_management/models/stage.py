@@ -33,6 +33,48 @@ SENSITIVE_VAR_KEYS = {
 }
 
 
+def _clean_ansible_log(raw, ok):
+    """Human-friendly 'Last Operation Details': show ERRORS ONLY.
+
+    On success → '' (the toast and the ✅ state already say it worked, so we don't
+    dump the raw PLAY/TASK/RECAP). On failure → the failing step plus the real error
+    message(s) extracted from the ansible output (msg/stderr/stdout of the failed
+    task), not the whole playbook scaffolding."""
+    if ok:
+        return ''
+    text = (raw or '').strip()
+    if not text:
+        return ''
+    lines = text.splitlines()
+    task = ''
+    for ln in lines:
+        m = re.match(r'\s*TASK \[(.+?)\]', ln)
+        if m:
+            task = m.group(1)
+    chunks = []
+    for ln in lines:
+        if re.search(r'fatal:|FAILED!|UNREACHABLE!|^ERROR', ln):
+            jm = re.search(r'=>\s*(\{.*\})\s*$', ln)
+            if jm:
+                try:
+                    d = json.loads(jm.group(1))
+                    for k in ('msg', 'module_stderr', 'stderr', 'stdout', 'module_stdout'):
+                        v = d.get(k)
+                        if v and str(v).strip():
+                            chunks.append(str(v).strip())
+                    if chunks:
+                        continue
+                except Exception:  # noqa: BLE001 — fall back to the raw line
+                    pass
+            chunks.append(ln.strip())
+    # De-duplicate while preserving order; fall back to the raw text if we could not
+    # recognise any error markers (so we never hide a real failure).
+    detail = '\n'.join(dict.fromkeys(c for c in chunks if c)) or text
+    if task:
+        detail = 'Failed at: %s\n\n%s' % (task, detail)
+    return detail[-4000:]  # bounded but big enough to show a traceback
+
+
 class Stage(models.Model):
     _name = 'server.stage'
     _description = 'Server Stage'
@@ -515,10 +557,9 @@ class Stage(models.Model):
             ok = bool(res.get('ok'))
             message = res.get('message') or (
                 _('%s finished.') % label if ok else _('%s failed.') % label)
-            # `detail` is the FULL output (e.g. the whole ansible log) persisted to
-            # op_detail so the user can review it / debug errors after the job ends.
-            # `message` stays short for the toast.
-            detail = res.get('detail') or message
+            # Last Operation Details shows ERRORS ONLY: empty on success, the cleaned
+            # failure error (no raw PLAY/TASK/RECAP) on failure.
+            detail = _clean_ansible_log(res.get('detail') or message, ok)
             url = res.get('url') or False
             title = ('✅ %s' % label) if ok else ('❌ %s' % label)
             vals = {'op_state': 'done' if ok else 'failed',
