@@ -14,7 +14,14 @@ class UpgradeModuleWizard(models.TransientModel):
     _description = 'Upgrade Odoo Module Wizard'
 
     stage_id = fields.Many2one('server.stage', string='Stage', required=True)
-    database_name = fields.Selection(selection='_sel_databases', string='Database', required=True)
+    # Free text so any database name can be typed; the picker below fills it from
+    # the discovered list as a convenience.
+    database_name = fields.Char(
+        string='Database', required=True,
+        help="Technical name of the database to upgrade. Use 'Select database' to "
+             "fill it from the discovered list, or type any name yourself.")
+    database_pick = fields.Selection(selection='_sel_databases', string='Select database',
+                                     store=False)
     # The actual modules to upgrade: one or more technical names, comma/space
     # separated. Free text, so ANY module can be typed (custom or Odoo core), and
     # several can be upgraded together (Odoo's `-u` takes a comma-separated list).
@@ -59,6 +66,13 @@ class UpgradeModuleWizard(models.TransientModel):
             if tok and tok not in out:
                 out.append(tok)
         return out
+
+    @api.onchange('database_pick')
+    def _onchange_database_pick(self):
+        # Picking from the list fills the free-text Database field, then resets.
+        if self.database_pick:
+            self.database_name = self.database_pick
+            self.database_pick = False
 
     @api.onchange('module_pick')
     def _onchange_module_pick(self):
