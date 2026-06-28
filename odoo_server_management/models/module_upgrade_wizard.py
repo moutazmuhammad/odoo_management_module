@@ -43,9 +43,10 @@ class UpgradeModuleWizard(models.TransientModel):
         self._check_names()
         self.ensure_one()
         stage = self.stage_id.sudo()
-        if not stage.upgrade_module_path or not stage.odoo_user:
-            raise UserError(_("This instance is missing the upgrade module path or "
-                              "Odoo user. Run discovery or set them manually."))
+        if not stage.upgrade_module_path or not stage.odoo_user or not stage.conf_file:
+            raise UserError(_("This instance is missing the upgrade module path, "
+                              "configuration file, or Odoo user. Run discovery or "
+                              "set them manually."))
 
         # Capture plain values now (the wizard is transient and may be vacuumed before
         # the background job runs).
@@ -59,6 +60,7 @@ class UpgradeModuleWizard(models.TransientModel):
                 'module_name': module_name,
                 'service_name': stg.service_name,
                 'upgrade_module_path': stg.upgrade_module_path,
+                'conf_file': stg.conf_file,
                 'odoo_user': stg.odoo_user,
             }
             result = stg._run_ansible_playbook(playbook, stg._build_inventory(), extra_vars)
