@@ -95,6 +95,27 @@ class ServerHost(models.Model):
         ('unique_host_ip', 'unique(ip)', 'A host with this IP already exists!'),
     ]
 
+    def _register_hook(self):
+        """On every (re)start of the Odoo service, any operation still marked
+        'running' belonged to a background worker thread that the restart killed —
+        so it can never finish on its own. Mark such ops as failed/interrupted so
+        the UI never sticks on a phantom 'Running' (a fresh run overwrites this)."""
+        res = super()._register_hook()
+        try:
+            for model in ('server.host', 'server.stage'):
+                stuck = self.env[model].sudo().search([('op_state', '=', 'running')])
+                if stuck:
+                    stuck.write({
+                        'op_state': 'failed',
+                        'op_time': fields.Datetime.now(),
+                        'op_detail': _('Interrupted — the Odoo service was restarted '
+                                       'while this was running. Please run it again.')})
+            self.env.cr.commit()
+        except Exception:  # noqa: BLE001 — never block startup
+            self.env.cr.rollback()
+            _logger.exception("Resetting stuck op_state on startup failed")
+        return res
+
     @api.depends('stage_ids')
     def _compute_instance_count(self):
         for host in self:
