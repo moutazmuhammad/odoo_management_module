@@ -14,14 +14,6 @@ _SINGLE_LIMIT = 4 * 1024 ** 3
 _PART_SIZE = 512 * 1024 ** 2
 
 
-def _sanitize_seg(seg):
-    """A safe single path segment (domain or ip-seg) — no slashes/traversal."""
-    seg = (seg or '').strip().strip('/')
-    if not seg or '/' in seg or '..' in seg or not SAFE.match(seg):
-        return ''
-    return seg
-
-
 class BackupAgentController(http.Controller):
     """Presign service for the per-server backup agents. Each managed server runs
     a local cron agent that detects its exposed DBs, asks here for short-lived
@@ -47,7 +39,7 @@ class BackupAgentController(http.Controller):
         if not Storage._keys_set():
             return {'error': 'storage not configured'}
         category = host.backup_category or 'odex'
-        ip_seg = (host.ip or '').replace('.', '-')
+        ip_seg = host._backup_host_seg(host.ip)
         server_seg = host._backup_server_seg()
         day = fields.Date.to_string(fields.Date.context_today(host))
         ICP = request.env['ir.config_parameter'].sudo()
@@ -64,8 +56,9 @@ class BackupAgentController(http.Controller):
             db = (d.get('db') or '').strip()
             if not db or not SAFE.match(db):
                 continue
-            seg = _sanitize_seg(d.get('domain')) or ip_seg
+            seg = host._backup_host_seg(d.get('domain')) or ip_seg
             # <category>/<server>/<domain-or-ip>/<db>/<db>_<date>.zip
+            # (db kept verbatim; only the server name is dash-normalized.)
             key = Storage._object_key(
                 [category, server_seg, seg, db, '%s_%s.zip' % (db, day)])
             size = int(d.get('size') or 0)
@@ -115,12 +108,12 @@ class BackupAgentController(http.Controller):
         # Final pass: prune old objects for this host's folder.
         if done:
             category = host.backup_category or 'odex'
-            ip_seg = (host.ip or '').replace('.', '-')
             try:
-                # Server folder covers every instance/db; the legacy (no-server-name)
-                # IP folder is also pruned so pre-change backups age out.
+                # Server folder covers every instance/db; the legacy IP folders
+                # (dotted + old dashed) are also pruned so pre-change backups age out.
                 Storage._prune(Storage._object_key([category, host._backup_server_seg()]) + '/')
-                Storage._prune(Storage._object_key([category, ip_seg]) + '/')
+                Storage._prune(Storage._object_key([category, host._backup_host_seg(host.ip)]) + '/')
+                Storage._prune(Storage._object_key([category, (host.ip or '').replace('.', '-')]) + '/')
             except Exception:  # noqa: BLE001
                 _logger.exception("agent prune failed for host %s", host.name)
             host.sudo().last_backup = fields.Datetime.now()

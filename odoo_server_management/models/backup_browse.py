@@ -51,8 +51,10 @@ class BackupFile(models.TransientModel):
     # ------------------------------------------------------------------
     # Client-server classification (download gating)
     # ------------------------------------------------------------------
-    @staticmethod
-    def _norm_seg(name):
+    @api.model
+    def _norm_seg(self, name):
+        """The ip/domain path segment for a stage's name — KEEPS dots (matching the
+        dotted ip/domain segments used in backup keys). Strips any URL scheme/port."""
         if not name:
             return ''
         h = name.strip().lower()
@@ -60,9 +62,7 @@ class BackupFile(models.TransientModel):
         if m:
             h = m.group(1)
         h = h.split('/')[0].split(':')[0]
-        if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', h):
-            h = h.replace('.', '-')
-        return h
+        return self.env['server.host']._backup_host_seg(h)
 
     @api.model
     def _client_dbs_segs(self):
@@ -186,7 +186,7 @@ class BackupFile(models.TransientModel):
         # server IP is shared by every instance that has no domain, so matching
         # on it would wrongly show all those DBs under each IP-named stage — for
         # those, match strictly by the stage's own databases.
-        ip_seg = (stage.host_id.ip or '').replace('.', '-')
+        ip_seg = self.env['server.host']._backup_host_seg(stage.host_id.ip)
         domain_seg = seg if (seg and seg != ip_seg) else None
         prefix = Storage._prefix()
         client_dbs, client_segs = self._client_dbs_segs()

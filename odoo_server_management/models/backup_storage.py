@@ -19,6 +19,9 @@ class BackupStorage(models.AbstractModel):
 
         <prefix?>/<category>/<server>/<ip-or-domain>/<db>/<db>_<date>.zip  (daily)
         <prefix?>/manual/<category>/<ip-or-domain>/<db>.<ext>             (real-time)
+
+    The <server> segment is the dash-slugged server name; <ip-or-domain> and <db>
+    keep their dots (e.g. erp/epr-dev-servers/46.101.127.229/mydb/mydb_2026-06-28.zip).
     """
     _name = 'server.backup.storage'
     _description = 'Backup Storage (global object-storage target)'

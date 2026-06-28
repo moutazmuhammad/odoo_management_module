@@ -82,7 +82,7 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         # daily retention prune only touches '<category>/...', so it never affects
         # these.
         category = host.backup_category or 'odex'
-        seg = (host.ip or '').replace('.', '-')
+        seg = host._backup_host_seg(host.ip)
         ext = 'dump' if self.backup_format == 'dump' else 'zip'
         key = Storage._object_key(
             ['manual', category, seg, '%s.%s' % (self.db_name, ext)])

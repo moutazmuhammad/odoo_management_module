@@ -63,7 +63,8 @@ class ServerHost(models.Model):
         [('odex', 'Odex'), ('erp', 'ERP')],
         string='Backup Category', required=True, default='odex',
         help="Top-level folder for this server's backups in the shared Space: "
-             "<bucket>/<category>/<server>/<ip-or-domain>/<db>/<db>_<date>.zip.")
+             "<bucket>/<category>/<server>/<ip-or-domain>/<db>/<db>_<date>.zip "
+             "(e.g. erp/epr-dev-servers/46.101.127.229/mydb/mydb_2026-06-28.zip).")
     backup_extra_dbs = fields.Text(
         string='Additional Databases to Back Up', groups=GROUP_DEVOPS,
         help="Exact database names (comma- or newline-separated) to ALWAYS back "
@@ -292,13 +293,31 @@ class ServerHost(models.Model):
     _BACKUP_SINGLE_LIMIT = 4 * 1024 ** 3
     _BACKUP_PART_SIZE = 512 * 1024 ** 2
 
+    @staticmethod
+    def _backup_norm(value):
+        """Normalize the SERVER-NAME path segment: lowercased, with spaces, dots and
+        any other unsafe char turned into '-'. Underscores and hyphens are kept; runs
+        of '-' collapse and are trimmed. (The server name never keeps dots — only the
+        ip/domain segment and the '.zip' extension do.)"""
+        s = re.sub(r'[^a-z0-9_-]+', '-', (value or '').strip().lower())
+        return re.sub(r'-{2,}', '-', s).strip('-')
+
+    @staticmethod
+    def _backup_host_seg(value):
+        """Normalize an IP/DOMAIN path segment — like _backup_norm but KEEPS dots
+        (so keys read .../erp.example.com/... and .../46.101.127.229/...). Lowercased,
+        spaces and other unsafe chars become '-', repeated '.'/'-' collapse, and edge
+        '.'/'-' are stripped (guards against '..' path traversal)."""
+        s = re.sub(r'[^a-z0-9._-]+', '-', (value or '').strip().lower())
+        s = re.sub(r'\.{2,}', '.', re.sub(r'-{2,}', '-', s))
+        return s.strip('.-')
+
     def _backup_server_seg(self):
         """Path segment identifying THIS server inside a backup key — a slug of the
         server's name (so keys read <category>/<server>/<domain>/<db>/...). Falls
-        back to the dashed IP if the name is empty."""
+        back to the IP if the name is empty."""
         self.ensure_one()
-        slug = re.sub(r'[^a-z0-9.\-]+', '-', (self.name or '').strip().lower()).strip('-')
-        return slug or (self.ip or '').replace('.', '-')
+        return self._backup_norm(self.name) or self._backup_host_seg(self.ip)
 
     def _run_daily_backup(self, project=None, only_dbs=None):
         """Detect every DB on this host and upload each to the shared Space
@@ -343,7 +362,7 @@ class ServerHost(models.Model):
         #    client is bounded to one DB at a time. (Scales to many DBs/servers.)
         category = self.backup_category or 'odex'
         day = fields.Date.to_string(fields.Date.context_today(self))
-        ip_seg = (self.ip or '').replace('.', '-')
+        ip_seg = self._backup_host_seg(self.ip)
         server_seg = self._backup_server_seg()
         ok = 0
         for it in items:
@@ -355,12 +374,14 @@ class ServerHost(models.Model):
                                   self.name, it.get('db'))
 
         # 3. Prune old daily objects for this server. The server folder now covers
-        #    every instance/db under it; the legacy (no-server-name) folders are
-        #    also pruned so pre-change backups age out under the old layout.
+        #    every instance/db under it; legacy (no-server-name and old dashed-IP)
+        #    folders are also pruned so pre-change backups age out under their layout.
         try:
             Storage._prune(Storage._object_key([category, server_seg]) + '/')
             Storage._prune(Storage._object_key([category, ip_seg]) + '/')
-            for dom in {it.get('domain') for it in items if it.get('domain')}:
+            Storage._prune(Storage._object_key([category, (self.ip or '').replace('.', '-')]) + '/')
+            for dom in {self._backup_host_seg(it.get('domain'))
+                        for it in items if it.get('domain')}:
                 Storage._prune(Storage._object_key([category, dom]) + '/')
         except Exception:
             _logger.exception("Backup prune failed for host %s", self.name)
@@ -377,7 +398,9 @@ class ServerHost(models.Model):
         db = it.get('db')
         if not db:
             return False
-        seg = it.get('domain') or ip_seg
+        seg = self._backup_host_seg(it.get('domain')) or ip_seg
+        # <category>/<server>/<domain-or-ip>/<db>/<db>_<date>.zip
+        # (db is kept verbatim — only the server name is dash-normalized.)
         key = Storage._object_key(
             [category, server_seg, seg, db, '%s_%s.zip' % (db, day)])
         size = int(it.get('size') or 0)
