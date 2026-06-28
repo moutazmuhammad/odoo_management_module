@@ -340,77 +340,96 @@ class ServerHost(models.Model):
         base = '%s:%s' % (self.ip, port) if port else (self.ip or '')
         return self._backup_host_seg(base)
 
+    def _backup_targets(self, only_dbs=None):
+        """Authoritative list of backup targets for this host: EVERY database of EVERY
+        stage (from the cached available_databases, kept fresh by the 15-min
+        _cron_refresh_databases), each with its path segment derived from the stage
+        name (nginx domain, else ip:port). This is the manager's source of truth —
+        the agent fetches the same list — so nothing is ever silently skipped."""
+        self.ensure_one()
+        targets, seen = [], set()
+        for st in self.stage_ids:
+            name = (st.name or '').strip()
+            if ':' in name:                       # "<ip>:<port>" form
+                domain, port = '', name.rsplit(':', 1)[1]
+            else:                                 # nginx domain (or fallback name)
+                domain, port = name, ''
+            for db in (st.available_databases or '').splitlines():
+                db = db.strip()
+                if db and db not in seen:
+                    seen.add(db)
+                    targets.append({'db': db, 'domain': domain, 'port': port})
+        for db in re.split(r'[,\n]', self.backup_extra_dbs or ''):  # additive override
+            db = db.strip()
+            if db and db not in seen:
+                seen.add(db)
+                targets.append({'db': db, 'domain': '', 'port': ''})
+        if only_dbs:
+            wanted = set(only_dbs)
+            targets = [t for t in targets if t['db'] in wanted]
+        return targets
+
     def _run_daily_backup(self, project=None, only_dbs=None):
-        """Detect every DB on this host and upload each to the shared Space
+        """Back up EVERY database of EVERY stage on this host to the shared Space
         (single or multipart, pre-signed — keys never leave Odoo), then prune old
-        objects. Returns the number of databases uploaded successfully.
+        objects. Returns (uploaded, total, failed_dbs).
 
-        `only_dbs` (optional list) restricts the run to those database names —
-        used by targeted/self-test runs and scoped backups.
-
-        Everything (dump + zip + upload) runs ON this client server; the manager
-        only mints the short-lived pre-signed URLs."""
+        Targets come from the manager's authoritative list (_backup_targets); the
+        client only sizes + dumps + uploads them. Everything (dump + zip + upload)
+        runs ON this client server; the manager only mints the pre-signed URLs."""
         self.ensure_one()
         Storage = self.env['server.backup.storage']
         if not Storage._keys_set():
             _logger.warning("Backup skipped for host %s: storage not configured.",
                             self.name)
-            return 0
+            return (0, 0, [])
 
-        # 1. Detect databases live on the server (picks up new services/DBs).
-        #    Pass the per-host override list so multi-DB / ambiguous stages are
-        #    force-included by exact name.
-        extra = [x.strip() for x in re.split(r'[,\n]', self.backup_extra_dbs or '')
-                 if x.strip()]
-        force_b64 = (base64.b64encode(json.dumps(extra).encode()).decode()
-                     if extra else '')
-        detect = self._run('backup_detect.yml', {'force_dbs_b64': force_b64})
+        targets = self._backup_targets(only_dbs=only_dbs)
+        if not targets:
+            _logger.info("No databases to back up on host %s", self.name)
+            return (0, 0, [])
+        want = {t['db'] for t in targets}
+
+        # 1. Ask the client to size each target (filestore + bytes); the manager keeps
+        #    the WHAT + path segment, the client adds what only it knows.
+        targets_b64 = base64.b64encode(json.dumps(targets).encode()).decode()
+        detect = self._run('backup_detect.yml', {'targets_b64': targets_b64})
         if not detect.get('success'):
-            _logger.warning("Backup detect failed on host %s: %s",
+            _logger.warning("Backup sizing failed on host %s: %s",
                             self.name, (detect.get('output') or '')[:300])
-            return 0
+            return (0, len(want), sorted(want))
         items = self._parse_backup_json(detect.get('output'), 'ODOO_BACKUP_DETECT:') or []
-        if only_dbs:
-            wanted = set(only_dbs)
-            items = [it for it in items if it.get('db') in wanted]
-        if not items:
-            _logger.info("No Odoo databases detected on host %s", self.name)
-            return 0
 
-        # 2. Back up each DB in its OWN ansible run so every database has its own
-        #    timeout and a single huge/slow DB can never starve the rest —
-        #    completed DBs persist even if a later one fails. Temp disk on the
-        #    client is bounded to one DB at a time. (Scales to many DBs/servers.)
+        # 2. Back up each DB in its OWN ansible run so one huge/slow DB never starves
+        #    the rest and completed DBs persist even if a later one fails.
         category = self.backup_category or 'odex'
         day = fields.Date.to_string(fields.Date.context_today(self))
         ip_seg = self._backup_host_seg(self.ip)
         server_seg = self._backup_server_seg()
-        ok = 0
+        ok, done = 0, set()
         for it in items:
+            db = it.get('db')
             try:
                 if self._backup_one_db(Storage, it, category, day, ip_seg, server_seg):
                     ok += 1
+                    done.add(db)
             except Exception:
-                _logger.exception("Backup errored for %s/%s",
-                                  self.name, it.get('db'))
+                _logger.exception("Backup errored for %s/%s", self.name, db)
+        # Anything we couldn't size/reach or that failed to upload = not done.
+        failed = sorted(want - done)
 
-        # 3. Prune old daily objects for this server. The server folder now covers
-        #    every instance/db under it; legacy (no-server-name and old dashed-IP)
-        #    folders are also pruned so pre-change backups age out under their layout.
+        # 3. Prune old daily objects for this server (legacy folders too).
         try:
             Storage._prune(Storage._object_key([category, server_seg]) + '/')
             Storage._prune(Storage._object_key([category, ip_seg]) + '/')
             Storage._prune(Storage._object_key([category, (self.ip or '').replace('.', '-')]) + '/')
-            for dom in {self._backup_host_seg(it.get('domain'))
-                        for it in items if it.get('domain')}:
-                Storage._prune(Storage._object_key([category, dom]) + '/')
         except Exception:
             _logger.exception("Backup prune failed for host %s", self.name)
 
         self.sudo().last_backup = fields.Datetime.now()
         _logger.info("Daily backup on host %s: %s/%s databases uploaded to %s",
-                     self.name, ok, len(items), Storage._bucket())
-        return ok
+                     self.name, ok, len(want), Storage._bucket())
+        return (ok, len(want), failed)
 
     def _backup_one_db(self, Storage, it, category, day, ip_seg, server_seg):
         """Build + upload ONE database in its own ansible run (own timeout).
@@ -489,7 +508,7 @@ class ServerHost(models.Model):
             # the 5-min status cron and fails with "could not serialize access due to
             # concurrent update". The uploads are already in object storage (not
             # transactional), so only the bookkeeping is deferred to phase 2.
-            ok, n, detail = False, 0, ''
+            ok, uploaded, total, failed, detail = False, 0, 0, [], ''
             try:
                 with odoo.registry(dbname).cursor() as cr:
                     env = api.Environment(cr, uid, {})
@@ -497,19 +516,31 @@ class ServerHost(models.Model):
                     if not host.exists():
                         return
                     try:
-                        n = host._run_daily_backup()
-                        ok = True
+                        uploaded, total, failed = host._run_daily_backup()
+                        ok = not failed          # success ONLY if nothing was missed
                     except Exception as exc:  # noqa: BLE001 — report, never crash
                         _logger.exception("Manual backup failed for host %s", rec_id)
                         detail = (str(exc) or repr(exc))[-2000:]
+                        failed = ['*']
                     cr.rollback()
             except Exception as exc:  # noqa: BLE001
                 _logger.exception("Manual backup thread crashed for host %s", rec_id)
                 detail = (str(exc) or repr(exc))[-2000:]
+                failed = ['*']
 
-            message = (_("✅ Backup complete: %(n)s database(s) uploaded for %(s)s.")
-                       % {'n': n, 's': host_name}) if ok else _("Backup failed.")
-            title = ('✅ %s' % label) if ok else ('❌ %s' % label)
+            if ok:
+                message = _("✅ Backup complete: %(n)s/%(t)s database(s) uploaded "
+                            "for %(s)s.") % {'n': uploaded, 't': total, 's': host_name}
+            else:
+                named = [d for d in failed if d != '*']
+                message = _("⚠️ Backup: %(n)s/%(t)s uploaded for %(s)s — %(f)s "
+                            "failed.") % {'n': uploaded, 't': total, 's': host_name,
+                                          'f': len(failed)}
+                if not detail:
+                    detail = _("Uploaded %(n)s of %(t)s. Failed (%(f)s): %(d)s") % {
+                        'n': uploaded, 't': total, 'f': len(named),
+                        'd': ", ".join(named[:50]) or '(sizing/connection error)'}
+            title = ('✅ %s' % label) if ok else ('⚠️ %s' % label)
             # Phase 2 — short, retryable bookkeeping (op_* + last_backup), resilient
             # to the status cron writing concurrently.
             for attempt in range(5):
@@ -521,7 +552,7 @@ class ServerHost(models.Model):
                             vals = {'op_state': 'done' if ok else 'failed',
                                     'op_time': fields.Datetime.now(),
                                     'op_detail': '' if ok else (detail or message)}
-                            if ok:
+                            if uploaded:  # stamp even on partial success
                                 vals['last_backup'] = fields.Datetime.now()
                             host.write(vals)
                         env['server.stage']._send_op_bus(

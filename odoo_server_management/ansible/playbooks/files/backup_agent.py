@@ -72,14 +72,25 @@ def main():
     force = [x.strip() for x in cfg.get('extra_dbs', '').replace('\n', ',').split(',')
              if x.strip()]
 
-    items, skipped = sb.detect_items(force)
+    # Authoritative target list from the manager — EVERY database of EVERY stage,
+    # with its path segment — fetched each run so the agent always has the newest
+    # set (the manager keeps it fresh via discovery + the DB-refresh cron). The
+    # local extra_dbs is an additive override.
+    targets = post(base + '/server_backup/agent/dblist',
+                   {'token': token}, insecure, host_header).get('targets') or []
+    have = {t.get('db') for t in targets}
+    for db in force:
+        if db and db not in have:
+            targets.append({'db': db, 'domain': '', 'port': ''})
+            have.add(db)
+    items = sb._size_targets(targets)
     # Optional targeted run (testing / manual): ODOO_BACKUP_ONLY=db1,db2
     only = [x.strip() for x in os.environ.get('ODOO_BACKUP_ONLY', '').split(',')
             if x.strip()]
     if only:
         items = [it for it in items if it['db'] in only]
     if not items:
-        print('backup-agent: no exposed databases detected')
+        print('backup-agent: no databases to back up')
         return
 
     # Process ONE database at a time — pre-sign, dump+upload, finalize — then move

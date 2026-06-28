@@ -29,6 +29,18 @@ class BackupAgentController(http.Controller):
         return request.env['server.host'].sudo().search(
             [('agent_token', '=', token)], limit=1) or None
 
+    @http.route('/server_backup/agent/dblist', type='json', auth='public',
+                methods=['POST'], csrf=False)
+    def dblist(self, token=None, **kw):
+        """The authoritative list of databases the agent must back up for its host:
+        every database of every stage (with its path segment), kept fresh on the
+        manager by discovery + the 15-min DB-refresh cron. The agent fetches this
+        every run so it always has the newest set."""
+        host = self._host_for_token(token)
+        if not host:
+            return {'error': 'invalid token'}
+        return {'targets': host._backup_targets()}
+
     @http.route('/server_backup/agent/presign', type='json', auth='public',
                 methods=['POST'], csrf=False)
     def presign(self, token=None, dbs=None, **kw):

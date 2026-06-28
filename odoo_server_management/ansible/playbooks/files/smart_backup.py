@@ -526,8 +526,35 @@ def detect_items(force_dbs=()):
     return out, skipped
 
 
-def detect(force_dbs=()):
-    out, skipped = detect_items(force_dbs)
+def _size_targets(targets):
+    """Given manager-provided targets [{db, domain, port}] (the authoritative list of
+    every stage's databases + path segment), resolve each db's connection on THIS
+    host and attach filestore + size. The manager already decided WHAT to back up and
+    the segment; the client only adds what it knows. A db that can't be reached here
+    is dropped (the manager then sees it missing and reports it, never a false OK)."""
+    out, seen = [], set()
+    for t in targets:
+        db = (t.get('db') or '').strip()
+        if not db or db in seen:
+            continue
+        seen.add(db)
+        conn = _resolve_conn(db)
+        if not is_odoo_db(conn, db):
+            continue
+        fs = find_filestore(db)
+        out.append({'db': db, 'domain': t.get('domain') or '', 'port': t.get('port') or '',
+                    'filestore': fs, 'size': _db_bytes(conn, db) + _dir_bytes(fs)})
+    return out
+
+
+def detect(arg=()):
+    # Manager-driven: arg is a list of {db,domain,port} targets -> just size them.
+    if arg and isinstance(arg[0], dict):
+        out = _size_targets(arg)
+        print(DETECT_MARKER + base64.b64encode(json.dumps(out).encode()).decode())
+        return
+    # Fallback: client-side auto-detect (arg = list of forced db names).
+    out, skipped = detect_items(arg)
     print(DETECT_MARKER + base64.b64encode(json.dumps(out).encode()).decode())
     # Diagnostic only (ignored by the parser): instances we could not resolve to
     # a single DB, so an operator can set db_name / tighten dbfilter.

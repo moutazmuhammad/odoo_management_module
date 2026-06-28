@@ -7,7 +7,7 @@
   become: yes
   tasks:
     - name: Detect Odoo databases
-      script: files/smart_backup.py detect {{ force_dbs_b64 | default('') | quote }}
+      script: files/smart_backup.py detect {{ targets_b64 | default(force_dbs_b64 | default('')) | quote }}
       args:
         executable: python3
       register: detect_out
