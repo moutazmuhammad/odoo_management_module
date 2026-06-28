@@ -478,10 +478,18 @@ class ServerHost(models.Model):
                            'op_time': fields.Datetime.now(), 'op_detail': False})
         rec_id, dbname, uid = self.id, self.env.cr.dbname, self.env.uid
         label = _('Run backup')
+        host_name = self.name
 
         def _worker():
+            import time as _time
             import odoo
-            ok, message, detail = False, '', ''
+            # Phase 1 — the heavy work (dump + upload of every DB), which can run for
+            # many minutes. Roll back this long-lived transaction afterwards: its
+            # snapshot is stale by the end, so committing bookkeeping through it races
+            # the 5-min status cron and fails with "could not serialize access due to
+            # concurrent update". The uploads are already in object storage (not
+            # transactional), so only the bookkeeping is deferred to phase 2.
+            ok, n, detail = False, 0, ''
             try:
                 with odoo.registry(dbname).cursor() as cr:
                     env = api.Environment(cr, uid, {})
@@ -491,35 +499,39 @@ class ServerHost(models.Model):
                     try:
                         n = host._run_daily_backup()
                         ok = True
-                        message = _("✅ Backup complete: %(n)s database(s) uploaded "
-                                    "for %(s)s.") % {'n': n, 's': host.name}
                     except Exception as exc:  # noqa: BLE001 — report, never crash
                         _logger.exception("Manual backup failed for host %s", rec_id)
-                        message = _("Backup failed.")
                         detail = (str(exc) or repr(exc))[-2000:]
-                    host.write({'op_state': 'done' if ok else 'failed',
-                                'op_time': fields.Datetime.now(),
-                                'op_detail': '' if ok else (detail or message)})
-                    env['server.stage']._send_op_bus(
-                        uid, ok, ('✅ %s' if ok else '❌ %s') % label,
-                        message, sticky=not ok)
-                    cr.commit()
+                    cr.rollback()
             except Exception as exc:  # noqa: BLE001
                 _logger.exception("Manual backup thread crashed for host %s", rec_id)
+                detail = (str(exc) or repr(exc))[-2000:]
+
+            message = (_("✅ Backup complete: %(n)s database(s) uploaded for %(s)s.")
+                       % {'n': n, 's': host_name}) if ok else _("Backup failed.")
+            title = ('✅ %s' % label) if ok else ('❌ %s' % label)
+            # Phase 2 — short, retryable bookkeeping (op_* + last_backup), resilient
+            # to the status cron writing concurrently.
+            for attempt in range(5):
                 try:
                     with odoo.registry(dbname).cursor() as cr:
                         env = api.Environment(cr, uid, {})
-                        host = env['server.host'].browse(rec_id)
+                        host = env['server.host'].browse(rec_id).sudo()
                         if host.exists():
-                            host.sudo().write({
-                                'op_state': 'failed', 'op_time': fields.Datetime.now(),
-                                'op_detail': (str(exc) or repr(exc))[-2000:]})
+                            vals = {'op_state': 'done' if ok else 'failed',
+                                    'op_time': fields.Datetime.now(),
+                                    'op_detail': '' if ok else (detail or message)}
+                            if ok:
+                                vals['last_backup'] = fields.Datetime.now()
+                            host.write(vals)
                         env['server.stage']._send_op_bus(
-                            uid, False, '❌ %s' % label,
-                            _('Backup error: %s') % (str(exc)[-300:]), sticky=True)
+                            uid, ok, title, message, sticky=not ok)
                         cr.commit()
-                except Exception:  # noqa: BLE001
-                    _logger.exception("manual backup failure notify failed")
+                    break
+                except Exception:  # noqa: BLE001 — serialization/lock conflict, retry
+                    _logger.warning("Persist backup result for host %s: attempt %s "
+                                    "failed, retrying", rec_id, attempt + 1)
+                    _time.sleep(0.5 * (attempt + 1))
 
         import threading
         threading.Thread(target=_worker, name='odoo-host-backup', daemon=True).start()

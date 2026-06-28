@@ -4,10 +4,33 @@ import os
 import json
 import re
 import yaml
+import logging
 
 from .stage import GROUP_USER, GROUP_OPERATOR
 
+_logger = logging.getLogger(__name__)
 SAFE_NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+
+
+def _schedule_manual_delete(dbname, uid, key, delay):
+    """Remove a one-time manual backup from the Space shortly after the browser has
+    auto-downloaded it (manual backups must not linger in the bucket). Runs in a
+    daemon thread with its own cursor; the daily manual purge is the backstop."""
+    import threading
+    import time as _time
+    import odoo
+
+    def _del():
+        _time.sleep(max(0, delay))
+        try:
+            with odoo.registry(dbname).cursor() as cr:
+                env = odoo.api.Environment(cr, uid, {})
+                env['server.backup.storage'].sudo()._delete_key(key)
+                cr.commit()
+        except Exception:  # noqa: BLE001
+            _logger.exception("Manual backup auto-delete failed for %s", key)
+
+    threading.Thread(target=_del, name='odoo-manual-del', daemon=True).start()
 
 
 class ServerBackupDatabaseWizard(models.TransientModel):
@@ -122,9 +145,14 @@ class ServerBackupDatabaseWizard(models.TransientModel):
                 download_url = St._presign_get(key, filename=filename)
             except Exception:  # noqa: BLE001
                 download_url = ''
+            # Manual backups are one-time: schedule the object's removal shortly after
+            # the browser auto-downloads it, so it never lingers in the bucket.
+            _schedule_manual_delete(stg.env.cr.dbname, stg.env.uid, key,
+                                    St._manual_delete_delay())
             # The presigned GET sets Content-Disposition attachment, so the frontend
             # service triggers the download automatically when this arrives.
             return {'ok': True, 'url': download_url,
-                    'message': _('✅ Backup of %s ready — downloading…') % db_name}
+                    'message': _('✅ Backup of %s ready — downloading (it is removed '
+                                 'from storage right after).') % db_name}
 
         return stage._run_bg(_('Backup database %s') % db_name, work)
