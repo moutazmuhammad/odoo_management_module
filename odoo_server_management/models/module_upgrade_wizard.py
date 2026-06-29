@@ -88,6 +88,12 @@ class UpgradeModuleWizard(models.TransientModel):
     @api.constrains('database_name', 'module_names')
     def _check_names(self):
         for rec in self:
+            db = (rec.database_name or '').strip()
+            # Exactly one database per upgrade (modules may be many, the DB may not).
+            if db and len(db.replace(',', ' ').split()) > 1:
+                raise ValidationError(_(
+                    "Only one database can be upgraded at a time — enter a single "
+                    "database name."))
             for val in [rec.database_name] + rec._module_list():
                 if val and not SAFE_NAME_RE.match(val.strip()):
                     raise ValidationError(_(
