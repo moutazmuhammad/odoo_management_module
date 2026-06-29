@@ -74,6 +74,18 @@ class UpgradeModuleWizard(models.TransientModel):
             self.database_name = self.database_pick
             self.database_pick = False
 
+    @api.onchange('database_name')
+    def _onchange_database_single(self):
+        # Immediate feedback: an upgrade targets one database (modules may be many),
+        # so warn as soon as more than one DB is typed (hard block is in _check_names).
+        if self.database_name and len(self.database_name.replace(',', ' ').split()) > 1:
+            return {'warning': {
+                'title': _("One database only"),
+                'message': _("Only one database can be upgraded at a time. Enter a "
+                             "single database name — you can still list several "
+                             "modules."),
+            }}
+
     @api.onchange('module_pick')
     def _onchange_module_pick(self):
         # Append the picked module to the free-text field, then clear the picker

@@ -44,6 +44,17 @@ class ServerBackupDatabaseWizard(models.TransientModel):
             self.db_name = self.db_pick
             self.db_pick = False
 
+    @api.onchange('db_name')
+    def _onchange_db_name_single(self):
+        # Immediate feedback: a backup targets exactly one database, so warn as soon
+        # as more than one is typed (the hard block is in _check_db_name on submit).
+        if self.db_name and len(self.db_name.replace(',', ' ').split()) > 1:
+            return {'warning': {
+                'title': _("One database only"),
+                'message': _("You can back up only one database at a time. "
+                             "Please enter a single database name."),
+            }}
+
     @api.constrains('db_name')
     def _check_db_name(self):
         for rec in self:
