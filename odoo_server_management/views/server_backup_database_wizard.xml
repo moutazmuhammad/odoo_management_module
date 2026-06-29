@@ -6,7 +6,10 @@
           <form string="Backup Database">
               <group>
                   <field name="stage_id"/>
-                  <field name="db_name"/>
+                  <field name="db_pick"
+                         options="{'no_create': True, 'no_open': True}"/>
+                  <field name="db_name"
+                         placeholder="e.g. odex25_rajhi_dev_db"/>
                   <field name="backup_format" widget="radio"/>
               </group>
               <footer>

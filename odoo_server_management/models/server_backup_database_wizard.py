@@ -15,7 +15,14 @@ class ServerBackupDatabaseWizard(models.TransientModel):
     _description = 'Backup Odoo Database Wizard'
 
     stage_id = fields.Many2one('server.stage', string='Stage', required=True, readonly=True)
-    db_name = fields.Selection(selection='_sel_databases', string='Database', required=True)
+    # Free text so any database name can be typed; the picker below fills it from
+    # the discovered list. One database per backup.
+    db_name = fields.Char(
+        string='Database', required=True,
+        help="Technical name of the database to back up. Use 'Select database' to "
+             "fill it from the discovered list, or type any name yourself.")
+    db_pick = fields.Selection(selection='_sel_databases', string='Select database',
+                               store=False)
     backup_format = fields.Selection(
         [('zip', 'Zip (database + filestore)'),
          ('dump', 'Dump (SQL only, no filestore)')],
@@ -30,10 +37,23 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         # the action context).
         return [(d, d) for d in (self.env.context.get('db_list') or [])]
 
+    @api.onchange('db_pick')
+    def _onchange_db_pick(self):
+        # Picking from the list fills the free-text Database field, then resets.
+        if self.db_pick:
+            self.db_name = self.db_pick
+            self.db_pick = False
+
     @api.constrains('db_name')
     def _check_db_name(self):
         for rec in self:
-            if rec.db_name and not SAFE_NAME_RE.match(rec.db_name.strip()):
+            db = (rec.db_name or '').strip()
+            # Exactly one database per backup.
+            if db and len(db.replace(',', ' ').split()) > 1:
+                raise ValidationError(_(
+                    "Only one database can be backed up at a time — enter a single "
+                    "database name."))
+            if db and not SAFE_NAME_RE.match(db):
                 raise ValidationError(_(
                     "Invalid database name '%s'. Only letters, digits, '.', '_' "
                     "and '-' are allowed."
