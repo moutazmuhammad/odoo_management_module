@@ -269,7 +269,9 @@ class ServerHost(models.Model):
         `stages` limits the refresh to those instances (used by the per-stage
         "Get Commit" button); default is every instance on the host (cron)."""
         self.ensure_one()
-        stages = stages if stages is not None else self.stage_ids
+        # sudo: a plain Server-Management user may press "Get Commit", and reading
+        # paths / the instance odoo_user (a devops-only field) must not be blocked.
+        stages = (stages if stages is not None else self.stage_ids).sudo()
         links = stages.mapped('repo_branch_paths')
         if not links:
             return
