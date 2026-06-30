@@ -227,7 +227,10 @@ class Stage(models.Model):
         action and jump to another record in a list/pager."""
         self.ensure_one()
         self._check_access(GROUP_USER)
-        self._load_backups()
+        # sudo: a plain Server-Management user may refresh the list; reading the
+        # host/category to list the bucket must not be blocked (and _load_backups
+        # swallows errors, so without this the list just silently stays empty).
+        self.sudo()._load_backups()
         return False
 
     def action_refresh_commits(self):
