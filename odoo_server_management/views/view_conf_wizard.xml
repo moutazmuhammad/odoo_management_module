@@ -16,10 +16,7 @@
                         min-height:58vh; max-height:70vh; overflow:auto;}
                 </style>
                 <div class="p-2">
-                    <div class="mb-2">
-                        <span style="font-weight:600;">📄 Configuration file: </span>
-                        <span class="o_conf_path"><field name="conf_file" nolabel="1" readonly="1"/></span>
-                    </div>
+                    <field name="conf_file" invisible="1"/>
                     <div class="o_conf_box">
                         <field name="conf_content" nolabel="1" readonly="1" widget="text"/>
                     </div>
