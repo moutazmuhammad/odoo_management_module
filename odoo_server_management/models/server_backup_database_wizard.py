@@ -15,14 +15,19 @@ class ServerBackupDatabaseWizard(models.TransientModel):
     _description = 'Backup Odoo Database Wizard'
 
     stage_id = fields.Many2one('server.stage', string='Stage', required=True, readonly=True)
-    # Free text so any database name can be typed; the picker below fills it from
-    # the discovered list. One database per backup.
-    db_name = fields.Char(
+    # The user does ONE thing: either pick the database from the discovered list
+    # (db_source='select') OR type it (db_source='manual') — never both.
+    db_source = fields.Selection(
+        [('select', 'Select from list'), ('manual', 'Type manually')],
         string='Database', required=True,
-        help="Technical name of the database to back up. Use 'Select database' to "
-             "fill it from the discovered list, or type any name yourself.")
-    db_pick = fields.Selection(selection='_sel_databases', string='Select database',
+        default=lambda self: 'select' if self.env.context.get('db_list') else 'manual')
+    db_pick = fields.Selection(selection='_sel_databases', string='Database',
                                store=False)
+    # Canonical value used by the backup; in 'select' mode it is filled from the
+    # picker, in 'manual' mode it is typed. One database per backup.
+    db_name = fields.Char(
+        string='Database name',
+        help="Technical name of the database to back up.")
     backup_format = fields.Selection(
         [('zip', 'Zip (database + filestore)'),
          ('dump', 'Dump (SQL only, no filestore)')],
@@ -37,12 +42,18 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         # the action context).
         return [(d, d) for d in (self.env.context.get('db_list') or [])]
 
+    @api.onchange('db_source')
+    def _onchange_db_source(self):
+        # Switching method clears the other input so the two are never mixed.
+        self.db_name = False
+        self.db_pick = False
+
     @api.onchange('db_pick')
     def _onchange_db_pick(self):
-        # Picking from the list fills the free-text Database field, then resets.
+        # In 'select' mode the picked value IS the database (kept in db_name, the
+        # canonical field, since db_pick is not stored).
         if self.db_pick:
             self.db_name = self.db_pick
-            self.db_pick = False
 
     @api.onchange('db_name')
     def _onchange_db_name_single(self):
@@ -96,8 +107,10 @@ class ServerBackupDatabaseWizard(models.TransientModel):
 
     def action_backup(self):
         self.stage_id._check_action_access()
-        self._check_db_name()
         self.ensure_one()
+        if not (self.db_name or '').strip():
+            raise UserError(_("Choose a database from the list or type one."))
+        self._check_db_name()
         stage = self.stage_id.sudo()
         host = stage.host_id
         Storage = self.env['server.backup.storage']

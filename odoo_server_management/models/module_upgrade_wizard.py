@@ -14,25 +14,37 @@ class UpgradeModuleWizard(models.TransientModel):
     _description = 'Upgrade Odoo Module Wizard'
 
     stage_id = fields.Many2one('server.stage', string='Stage', required=True)
-    # Free text so any database name can be typed; the picker below fills it from
-    # the discovered list as a convenience.
-    database_name = fields.Char(
+
+    # --- Database: do ONE thing — pick it OR type it (never both). ---
+    database_source = fields.Selection(
+        [('select', 'Select from list'), ('manual', 'Type manually')],
         string='Database', required=True,
-        help="Technical name of the database to upgrade. Use 'Select database' to "
-             "fill it from the discovered list, or type any name yourself.")
-    database_pick = fields.Selection(selection='_sel_databases', string='Select database',
+        default=lambda self: 'select' if self.env.context.get('db_list') else 'manual')
+    database_pick = fields.Selection(selection='_sel_databases', string='Database',
                                      store=False)
-    # The actual modules to upgrade: one or more technical names, comma/space
-    # separated. Free text, so ANY module can be typed (custom or Odoo core), and
-    # several can be upgraded together (Odoo's `-u` takes a comma-separated list).
-    module_names = fields.Char(
+    # Canonical value (db_pick is not stored): filled from the picker in 'select'
+    # mode, typed in 'manual' mode. One database per upgrade.
+    database_name = fields.Char(
+        string='Database name',
+        help="Technical name of the database to upgrade.")
+
+    # --- Modules: do ONE thing — select several from the list OR type several
+    # comma-separated (never both). ---
+    module_source = fields.Selection(
+        [('select', 'Select from list'), ('manual', 'Type manually')],
         string='Modules', required=True,
-        help="Technical name(s) of the module(s) to upgrade, comma-separated. "
-             "Use 'Add from list' to insert a discovered module, or just type any "
-             "name yourself (e.g. account, sale).")
-    # Convenience picker: choosing a module appends it to 'Modules' and resets.
-    # Offers both the instance's custom modules and Odoo's bundled ones.
-    module_pick = fields.Selection(selection='_sel_modules', string='Add from list',
+        default=lambda self: 'select' if (self.env.context.get('module_list')
+                                          or self.env.context.get('odoo_module_list'))
+                             else 'manual')
+    # In 'select' mode each pick appends to module_names (the canonical, comma-
+    # separated value) which is shown read-only; in 'manual' mode it is typed.
+    module_names = fields.Char(
+        string='Modules',
+        help="Technical name(s) of the module(s) to upgrade, comma-separated "
+             "(e.g. account, sale).")
+    # Convenience picker (select mode): choosing a module appends it and resets, so
+    # several can be added. Offers the instance's custom modules and Odoo's core.
+    module_pick = fields.Selection(selection='_sel_modules', string='Add module',
                                    store=False)
 
     @api.model
@@ -67,12 +79,23 @@ class UpgradeModuleWizard(models.TransientModel):
                 out.append(tok)
         return out
 
+    @api.onchange('database_source')
+    def _onchange_database_source(self):
+        # Switching method clears the other input so the two are never mixed.
+        self.database_name = False
+        self.database_pick = False
+
+    @api.onchange('module_source')
+    def _onchange_module_source(self):
+        self.module_names = False
+        self.module_pick = False
+
     @api.onchange('database_pick')
     def _onchange_database_pick(self):
-        # Picking from the list fills the free-text Database field, then resets.
+        # In 'select' mode the picked value IS the database (kept in database_name,
+        # the canonical field, since database_pick is not stored).
         if self.database_pick:
             self.database_name = self.database_pick
-            self.database_pick = False
 
     @api.onchange('database_name')
     def _onchange_database_single(self):
@@ -115,8 +138,10 @@ class UpgradeModuleWizard(models.TransientModel):
 
     def action_upgrade(self):
         self.stage_id._check_action_access()
-        self._check_names()
         self.ensure_one()
+        if not (self.database_name or '').strip():
+            raise UserError(_("Choose a database from the list or type one."))
+        self._check_names()
         stage = self.stage_id.sudo()
         if not stage.upgrade_module_path or not stage.odoo_user or not stage.conf_file:
             raise UserError(_("This instance is missing the upgrade module path, "
