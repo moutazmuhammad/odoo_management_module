@@ -11,9 +11,10 @@
                     <field name="client_stage" invisible="1"/>
                     <field name="can_act" invisible="1"/>
                     <field name="odoo_status_live" nolabel="1" readonly="1" style="font-weight: bold;"/>
-                    <button name="action_check_status" type="object" string="Check Status"
+                    <button name="action_check_status_now" type="object" string="Check Status"
                             class="btn-secondary" icon="fa-refresh"
-                            groups="odoo_server_management.group_user"/>
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
                     <button name="action_backup_database" type="object" string="Backup"
                             class="btn-primary" icon="fa-database"
@@ -41,17 +42,17 @@
                     <button name="action_start_service" type="object" string="Start"
                             class="btn btn-success" icon="fa-play"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_stop_service" type="object" string="Stop"
                             class="btn btn-danger" icon="fa-stop"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_restart_service" type="object" string="Restart"
                             class="btn btn-warning" icon="fa-refresh"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
                 </header>
 
                 <sheet>

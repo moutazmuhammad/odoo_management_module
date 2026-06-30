@@ -1,12 +1,15 @@
 import os
 import re
 import json
+import time
 import shutil
 import logging
 import tempfile
 import subprocess
 import warnings
 import requests
+import psycopg2
+from psycopg2 import errorcodes
 
 from cryptography.fernet import Fernet, InvalidToken
 from urllib3.exceptions import InsecureRequestWarning
@@ -477,13 +480,32 @@ class Stage(models.Model):
                     stages = env['server.stage'].browse(stage_ids).exists()
                     for host in stages.mapped('host_id'):
                         hstages = stages.filtered(lambda s: s.host_id == host)
-                        try:
-                            host._refresh_status(hstages)
-                            cr.commit()
-                        except Exception:  # noqa: BLE001
-                            cr.rollback()
-                            _logger.exception(
-                                "Background status check failed for host %s", host.id)
+                        # Retry on a Postgres serialization conflict — this probe
+                        # writes server_stage rows that the refresh crons (and now
+                        # the open-form auto-refresh) also touch, so overlapping
+                        # writes can lose the commit; retry with a fresh snapshot.
+                        for attempt in range(5):
+                            try:
+                                host._refresh_status(hstages)
+                                cr.commit()
+                                break
+                            except psycopg2.OperationalError as e:
+                                cr.rollback()
+                                env.clear()
+                                if (getattr(e, 'pgcode', None) in (
+                                        errorcodes.SERIALIZATION_FAILURE,
+                                        errorcodes.DEADLOCK_DETECTED) and attempt < 4):
+                                    time.sleep(0.3 * (attempt + 1))
+                                    continue
+                                _logger.exception(
+                                    "Background status check failed for host %s", host.id)
+                                break
+                            except Exception:  # noqa: BLE001
+                                cr.rollback()
+                                env.clear()
+                                _logger.exception(
+                                    "Background status check failed for host %s", host.id)
+                                break
             except Exception:  # noqa: BLE001 — a thread must never crash the worker
                 _logger.exception("Background status check thread failed")
 
@@ -503,6 +525,31 @@ class Stage(models.Model):
                 'sticky': False,
             },
         }
+
+    def _status_check_work(self):
+        """`work` for _run_bg: probe the REAL systemd status over SSH and return it
+        so the worker persists odoo_status / service_status."""
+        def work(stage):
+            statuses = stage.host_id._service_statuses(stage)
+            v = statuses.get(stage.service_name)
+            status = ('running' if v in ('active', 'activating')
+                      else ('stopped' if v else False))
+            return {'ok': True, 'message': _('🔄 Status refreshed.'),
+                    'odoo_status': status or stage.odoo_status,
+                    'service_status': status == 'running'}
+        return work
+
+    def action_check_status_now(self):
+        """Per-stage "Check Status" button: refresh the REAL systemd status over SSH.
+        Routed through _run_bg so it is guarded against repeat presses (the button
+        is hidden while op_state == 'running' and a second call is rejected), and
+        the result lands via the bus so the page updates in place automatically."""
+        self.ensure_one()
+        self._check_access(GROUP_USER)
+        if not (self.host_id and self.service_name):
+            return True
+        return self.sudo()._run_bg(_('Check status'),
+                                   self._status_check_work(), reload=True)
 
     # ===========================
     # Background action runner (non-blocking actions with async result toasts)
@@ -538,6 +585,23 @@ class Stage(models.Model):
             },
         }
 
+    def _busy_toast(self):
+        """Returned when an action is pressed while one is still running: warn and
+        re-sync the view in place (so the buttons, hidden while op_state=='running',
+        stay hidden) — no second operation is launched."""
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'type': 'warning',
+                'title': _('Please wait'),
+                'message': _('⏳ An operation is already running on this instance — '
+                             'wait for it to finish.'),
+                'sticky': False,
+                'next': {'type': 'ir.actions.client', 'tag': 'server_mgmt_soft_reload'},
+            },
+        }
+
     @api.model
     def _send_op_bus(self, uid, ok, title, message, sticky=False, url=False, reload=False):
         """Push one operation-result notification to the user's bus channel. The
@@ -559,6 +623,17 @@ class Stage(models.Model):
         Authorization MUST already have been checked by the caller (in the request,
         as the real user) before calling this."""
         self.ensure_one()
+        # Concurrency guard: never launch a second operation while one is already
+        # running on this instance — this is what stops rapid double-clicks of
+        # Start/Stop/Restart/Check-Status from firing duplicate ansible runs. The
+        # row is locked (FOR UPDATE) so two near-simultaneous requests can't both
+        # read 'idle' before either writes 'running'; the lock is released the
+        # moment this short request commits (the slow work runs in a thread).
+        self.env.cr.execute(
+            "SELECT op_state FROM server_stage WHERE id = %s FOR UPDATE", [self.id])
+        row = self.env.cr.fetchone()
+        if row and row[0] == 'running':
+            return self._busy_toast()
         self.sudo().write({'op_label': label, 'op_state': 'running',
                            'op_time': fields.Datetime.now(), 'op_detail': False})
         stage_id, dbname, uid = self.id, self.env.cr.dbname, self.env.uid

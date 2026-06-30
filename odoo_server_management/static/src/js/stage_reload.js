@@ -15,6 +15,10 @@ import { FormController } from "@web/views/form/form_controller";
 import { formView } from "@web/views/form/form_view";
 import { registry } from "@web/core/registry";
 import { useBus } from "@web/core/utils/hooks";
+import { onWillUnmount } from "@odoo/owl";
+
+// How often an open Server / Instance form refreshes itself.
+const FORM_REFRESH_MS = 30000;
 
 // Application-bus event name. `env.bus` is the global bus shared by every
 // service and component, so the ops service, the form and the list all talk
@@ -33,7 +37,12 @@ registry.category("actions").add("server_mgmt_soft_reload", (env) => {
 export class ServerMgmtFormController extends FormController {
     setup() {
         super.setup();
+        // Refresh in place the instant an operation finishes (bus push)...
         useBus(this.env.bus, SM_RELOAD, () => this._smReload());
+        // ...and keep the open form fresh on a timer, so status, the last-operation
+        // state and the action buttons update automatically without a manual reload.
+        this._smTimer = setInterval(() => this._smTick(), FORM_REFRESH_MS);
+        onWillUnmount(() => clearInterval(this._smTimer));
     }
 
     async _smReload() {
@@ -43,6 +52,16 @@ export class ServerMgmtFormController extends FormController {
         if (rec && rec.resId && !rec.isDirty && !rec.isNew) {
             await rec.load();
         }
+    }
+
+    async _smTick() {
+        // Reload the open form's data in place so background changes (the latest
+        // status from the 5-min cron, last-operation state, commit info, …) and the
+        // action buttons update on their own. This is a cheap DB read only — live
+        // status re-probing is left to the Instances list, the 5-min status cron
+        // and the instant "Check Status" button, so an open form never piles SSH
+        // probes onto the shared status writes.
+        await this._smReload();
     }
 }
 
