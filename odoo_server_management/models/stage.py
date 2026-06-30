@@ -623,14 +623,10 @@ class Stage(models.Model):
     @api.model
     def _cron_refresh_status(self):
         """Background job: refresh every instance's real (systemd) status over SSH,
-        per host, so the list stays current. Commits per host for resilience."""
+        per host, so the list stays current. Commits per host (with serialization
+        retry) for resilience — see server.host._refresh_and_commit."""
         for host in self.env['server.host'].search([]):
-            try:
-                host._refresh_status()
-                self.env.cr.commit()
-            except Exception:  # noqa: BLE001
-                self.env.cr.rollback()
-                _logger.exception("Status refresh failed for host %s", host.id)
+            host._refresh_and_commit('_refresh_status', "Status refresh")
 
     def _build_inventory(self):
         """Inventory for this stage — connection comes entirely from its host."""

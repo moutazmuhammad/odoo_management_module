@@ -2,9 +2,13 @@ import os
 import re
 import json
 import math
+import time
 import base64
 import secrets
 import logging
+
+import psycopg2
+from psycopg2 import errorcodes
 
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError, AccessError, ValidationError
@@ -216,17 +220,47 @@ class ServerHost(models.Model):
             st.available_databases = "\n".join(dbs)
             st.databases_updated = now
 
+    def _refresh_and_commit(self, method, label, attempts=5):
+        """Run a per-host refresh (slow SSH probe + ORM writes) then commit,
+        retrying on a Postgres serialization failure / deadlock.
+
+        The status (5 min) and DB-list (15 min) crons both keep their transaction
+        snapshot open across a multi-second SSH probe and then write the SAME
+        server_stage rows. When they overlap, one commit fails with
+        `could not serialize access due to concurrent update` (SQLSTATE 40001) and
+        the whole host's refresh was previously LOST. We roll back and retry with a
+        fresh snapshot (re-probing), so the update lands instead of erroring out."""
+        self.ensure_one()
+        for attempt in range(attempts):
+            try:
+                getattr(self, method)()
+                self.env.cr.commit()
+                return True
+            except psycopg2.OperationalError as e:
+                self.env.cr.rollback()
+                self.env.clear()  # drop stale cache so the retry re-reads/re-writes
+                retryable = getattr(e, 'pgcode', None) in (
+                    errorcodes.SERIALIZATION_FAILURE, errorcodes.DEADLOCK_DETECTED)
+                if retryable and attempt < attempts - 1:
+                    _logger.info("%s: serialization conflict on host %s — retry %s/%s",
+                                 label, self.id, attempt + 1, attempts)
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                _logger.exception("%s failed for host %s", label, self.id)
+                return False
+            except Exception:  # noqa: BLE001
+                self.env.cr.rollback()
+                self.env.clear()
+                _logger.exception("%s failed for host %s", label, self.id)
+                return False
+
     @api.model
     def _cron_refresh_databases(self):
         """Background job (every 15 min): refresh cached DB lists for all hosts.
-        Commits per host so one unreachable server does not lose the others."""
+        Commits per host (with serialization retry) so one unreachable or
+        conflicting server does not lose the others."""
         for host in self.search([]):
-            try:
-                host._refresh_databases()
-                self.env.cr.commit()
-            except Exception:
-                self.env.cr.rollback()
-                _logger.exception("Scheduled DB refresh failed for host %s", host.id)
+            host._refresh_and_commit('_refresh_databases', "Scheduled DB refresh")
 
     def _auto_stop(self, days):
         """Stop instances on this host (that opt in) whose service has been up
