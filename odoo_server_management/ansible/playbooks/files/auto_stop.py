@@ -4,8 +4,8 @@
 argv[1] = base64(json) of {"days": N, "services": ["svc1", ...]}
 output  = ODOO_AUTOSTOP_JSON:<base64 json list of stopped service names>
 
-Only currently-active services older than the threshold are stopped, via
-passwordless sudo (same privilege the manual Stop action uses).
+Only currently-active services older than the threshold are stopped and
+disabled, via passwordless sudo (same privilege the manual Stop action uses).
 """
 import sys
 import json
@@ -55,6 +55,9 @@ if threshold and now:
         if (now - started) >= threshold:
             st = sh('sudo -n systemctl stop %s' % q)
             if st and st.returncode == 0:
+                # Also disable, so the instance stays off across a reboot — same as
+                # the manual Stop action (stop_service.yml: enabled=no).
+                sh('sudo -n systemctl disable %s' % q)
                 stopped.append(svc)
 
 print("ODOO_AUTOSTOP_JSON:" + base64.b64encode(json.dumps(stopped).encode()).decode())
