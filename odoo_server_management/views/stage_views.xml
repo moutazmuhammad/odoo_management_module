@@ -28,11 +28,13 @@
 
                     <button name="action_view_logs_stream" type="object" string="View Logs"
                             class="btn-primary" icon="fa-terminal"
-                            groups="odoo_server_management.group_user"/>
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
                     <button name="action_view_conf_file" type="object" string="View Conf File"
                             class="btn btn-primary" icon="fa-file-text"
-                            groups="odoo_server_management.group_user"/>
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
                     <button name="action_pull_code" type="object" string="Pull Code"
                             class="btn btn-primary" icon="fa-download"

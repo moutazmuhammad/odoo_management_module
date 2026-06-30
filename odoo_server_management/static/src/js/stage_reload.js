@@ -51,6 +51,10 @@ export class ServerMgmtFormController extends FormController {
         // refresh in that case (the user can reload manually).
         if (rec && rec.resId && !rec.isDirty && !rec.isNew) {
             await rec.load();
+            // Record.load() refreshes the data but does NOT re-render on its own —
+            // notify the model so the form actually repaints (status, last-operation
+            // state and the action buttons update without a manual reload).
+            this.model.notify();
         }
     }
 
