@@ -130,12 +130,21 @@ def find_repos(addons_path, user):
             if is_official_odoo(url):
                 continue  # never a pull target — and skip its huge ls-remote
             branch = git(root, 'rev-parse --abbrev-ref HEAD', user)
+            # Current HEAD commit (sha, short sha, subject, ISO date, author) in one
+            # call, \x1f-separated so subjects with spaces parse cleanly.
+            ci = git(root, "log -1 --format=%H%x1f%h%x1f%s%x1f%cI%x1f%an", user)
+            cp = (ci or '').split('\x1f')
             # Cache branches per repo URL so a repo shared by several instances is
             # listed once (ls-remote per repo is the slow part of discovery).
             if url not in _BRANCH_CACHE:
                 _BRANCH_CACHE[url] = repo_branches(root, user)
             found[root] = {'path': root, 'url': url, 'branch': branch or '',
-                           'branches': _BRANCH_CACHE[url]}
+                           'branches': _BRANCH_CACHE[url],
+                           'commit': cp[0].strip() if len(cp) > 0 else '',
+                           'commit_short': cp[1].strip() if len(cp) > 1 else '',
+                           'commit_subject': cp[2].strip() if len(cp) > 2 else '',
+                           'commit_date': cp[3].strip() if len(cp) > 3 else '',
+                           'commit_author': cp[4].strip() if len(cp) > 4 else ''}
     return list(found.values())
 
 

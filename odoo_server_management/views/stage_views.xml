@@ -106,14 +106,27 @@
                         </page>
 
                         <page string="Branch Configuration">
-                            <group>
-                                <field name="repo_branch_paths">
-                                    <tree editable="bottom">
-                                        <field name="repository_id"/>
-                                        <field name="branch_id"/>
-                                    </tree>
-                                </field>
-                            </group>
+                            <button name="action_refresh_commits" type="object"
+                                    string="Get Commit" class="btn-secondary"
+                                    icon="fa-refresh"
+                                    groups="odoo_server_management.group_user"/>
+                            <field name="repo_branch_paths">
+                                <tree default_order="repository_id">
+                                    <field name="repository_id"/>
+                                    <field name="branch_id"/>
+                                    <field name="current_commit_short" string="Commit"/>
+                                    <field name="commit_subject" string="Message"/>
+                                    <field name="commit_date" string="Commit Date" optional="show"/>
+                                    <field name="commit_author" string="Author" optional="hide"/>
+                                    <field name="current_commit" string="Full SHA" optional="hide"/>
+                                    <field name="commit_checked" string="Checked" optional="show"/>
+                                </tree>
+                            </field>
+                            <div class="text-muted" style="font-size:12px;">
+                                The commit each repository checkout is currently on,
+                                per branch. Filled during <b>Discover</b>, refreshed
+                                daily, and on demand via <b>Get Commit</b>.
+                            </div>
                         </page>
                         <page string="Backups">
                             <button name="action_refresh_backups" type="object"

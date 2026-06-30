@@ -227,6 +227,17 @@ class Stage(models.Model):
         self._load_backups()
         return False
 
+    def action_refresh_commits(self):
+        """Branch Configuration page button ("Get Commit"): refresh the current
+        git commit of THIS instance's repo checkouts now, over SSH. Returns a
+        falsy value so the web client just reloads this record's data (showing the
+        updated commits) without jumping to another record."""
+        self.ensure_one()
+        self._check_access(GROUP_USER)
+        if self.host_id:
+            self.host_id.sudo()._refresh_commits(self)
+        return False
+
     def action_open_form(self):
         """Open this stage's full form from the host's inline instance list. Kept
         light (no SSH/S3 on open) so it is instant — status refreshes via the 5-min

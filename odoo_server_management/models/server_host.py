@@ -262,6 +262,64 @@ class ServerHost(models.Model):
         for host in self.search([]):
             host._refresh_and_commit('_refresh_databases', "Scheduled DB refresh")
 
+    def _refresh_commits(self, stages=None):
+        """Refresh the current HEAD commit recorded for every repo checkout on this
+        host (one SSH session), and store it on each server.stage.repo.branch.path.
+
+        `stages` limits the refresh to those instances (used by the per-stage
+        "Get Commit" button); default is every instance on the host (cron)."""
+        self.ensure_one()
+        stages = stages if stages is not None else self.stage_ids
+        links = stages.mapped('repo_branch_paths')
+        if not links:
+            return
+        # One spec entry per distinct path (a repo shared by instances of the same
+        # owner is read once); carry the instance's odoo_user for sudo de-escalation.
+        specs, seen = [], set()
+        for link in links:
+            path = (link.pull_path or '').strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            specs.append({'path': path, 'user': link.stage_id.odoo_user or ''})
+        if not specs:
+            return
+        payload = base64.b64encode(json.dumps({'repos': specs}).encode()).decode()
+        playbook = os.path.join(os.path.dirname(__file__),
+                                '../ansible/playbooks/refresh_commits.yml')
+        result = self.env['server.stage']._run_ansible_playbook(
+            playbook, self._build_inventory(), {'spec': payload})
+        if not result.get('success'):
+            return
+        m = re.search(r'ODOO_GITCOMMITS_JSON:([A-Za-z0-9+/=]+)', result.get('output') or '')
+        if not m:
+            return
+        try:
+            cmap = json.loads(base64.b64decode(m.group(1)).decode())
+        except Exception:
+            _logger.warning("Failed to parse commit map for host %s", self.id)
+            return
+        now = fields.Datetime.now()
+        for link in links.sudo():
+            info = cmap.get((link.pull_path or '').strip())
+            if not info:
+                continue
+            link.write({
+                'current_commit': info.get('commit') or '',
+                'current_commit_short': info.get('commit_short') or '',
+                'commit_subject': info.get('subject') or '',
+                'commit_author': info.get('author') or '',
+                'commit_date': info.get('date') or '',
+                'commit_checked': now,
+            })
+
+    @api.model
+    def _cron_refresh_commits(self):
+        """Daily job: refresh the current git commit of every checkout on all hosts.
+        Commits per host (with serialization retry) for resilience."""
+        for host in self.search([]):
+            host._refresh_and_commit('_refresh_commits', "Commit refresh")
+
     def _auto_stop(self, days):
         """Stop instances on this host (that opt in) whose service has been up
         longer than `days`. Returns the list of stopped service names."""
@@ -971,16 +1029,24 @@ class ServerHost(models.Model):
                     existing[bn] = Branch.create({'name': bn, 'repository_id': repo.id})
             branch = existing.get(branch_name) or Branch.create(
                 {'name': branch_name, 'repository_id': repo.id})
+            commit_vals = {
+                'current_commit': (r.get('commit') or '').strip(),
+                'current_commit_short': (r.get('commit_short') or '').strip(),
+                'commit_subject': (r.get('commit_subject') or '').strip(),
+                'commit_author': (r.get('commit_author') or '').strip(),
+                'commit_date': (r.get('commit_date') or '').strip(),
+                'commit_checked': fields.Datetime.now(),
+            }
             link = Path.search([
                 ('stage_id', '=', stage.id), ('repository_id', '=', repo.id),
                 ('pull_path', '=', path),
             ], limit=1)
             if link:
-                link.write({'branch_id': branch.id})
+                link.write({'branch_id': branch.id, **commit_vals})
             else:
                 Path.create({
                     'stage_id': stage.id, 'repository_id': repo.id,
-                    'branch_id': branch.id, 'pull_path': path,
+                    'branch_id': branch.id, 'pull_path': path, **commit_vals,
                 })
 
     @staticmethod

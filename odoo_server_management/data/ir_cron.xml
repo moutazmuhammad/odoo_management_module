@@ -64,6 +64,19 @@
         <field name="active" eval="True"/>
     </record>
 
+    <!-- Daily: refresh the current git commit of every repo checkout on all hosts. -->
+    <record id="cron_refresh_commits" model="ir.cron">
+        <field name="name">Server Management: Refresh repo commits</field>
+        <field name="model_id" ref="model_server_host"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_refresh_commits()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="numbercall">-1</field>
+        <field name="active" eval="True"/>
+        <field name="nextcall" eval="(DateTime.now().replace(hour=4, minute=0, second=0, microsecond=0) + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')"/>
+    </record>
+
     <!-- Daily auto-stop of instances running longer than the configured days. -->
     <record id="cron_auto_stop" model="ir.cron">
         <field name="name">Server Management: Auto-stop stale instances</field>

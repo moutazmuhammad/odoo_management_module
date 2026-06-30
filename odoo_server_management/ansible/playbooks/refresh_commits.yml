@@ -1,0 +1,21 @@
+---
+# Report the current HEAD commit of each Odoo checkout (path) on the host in one
+# SSH session. Logic lives in files/git_commits.py and is run via the `script`
+# module (so Ansible never parses the Python source).
+#
+# Read-only. become defaults to no; the script self-escalates with passwordless
+# sudo only where needed (repos owned by the odoo user).
+- hosts: all
+  gather_facts: no
+  become: no
+  tasks:
+    - name: Read current commit of each checkout
+      script: files/git_commits.py {{ spec | quote }}
+      args:
+        executable: python3
+      register: commits_out
+      changed_when: false
+
+    - name: Emit commit map
+      debug:
+        msg: "{{ commits_out.stdout }}"
