@@ -5,7 +5,7 @@
       <field name="arch" type="xml">
           <form string="Backup Database">
               <group>
-                  <field name="stage_id"/>
+                  <field name="stage_id" invisible="1"/>
                   <field name="db_source" widget="radio" options="{'horizontal': True}"/>
                   <field name="db_pick" options="{'no_create': True, 'no_open': True}"
                          attrs="{'invisible': [('db_source', '!=', 'select')],
