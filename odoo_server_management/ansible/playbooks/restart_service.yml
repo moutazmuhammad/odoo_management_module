@@ -2,8 +2,9 @@
 - hosts: all
   gather_facts: no
   tasks:
-    - name: Restart Odoo service
+    - name: Restart Odoo service (and enable it, so it survives a reboot)
       ansible.builtin.systemd:
         name: "{{ service_name }}"
         state: restarted
+        enabled: yes
       become: yes
