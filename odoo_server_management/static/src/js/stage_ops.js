@@ -5,10 +5,11 @@
 // that outcome as a toast and, for a finished backup, triggers the auto-download.
 import { registry } from "@web/core/registry";
 import { session } from "@web/session";
+import { SM_RELOAD } from "@odoo_server_management/js/stage_reload";
 
 const serverMgmtOpsService = {
-    dependencies: ["bus_service", "notification", "action"],
-    start(env, { bus_service, notification, action }) {
+    dependencies: ["bus_service", "notification"],
+    start(env, { bus_service, notification }) {
         const channel = "server_mgmt_ops_" + session.uid;
         bus_service.addChannel(channel);
         bus_service.addEventListener("notification", ({ detail: notifications }) => {
@@ -34,12 +35,12 @@ const serverMgmtOpsService = {
                     a.click();
                     a.remove();
                 }
-                // Every finished action refreshes the current view (a soft reload of
-                // the current view only, never a full browser page load): the
-                // running/stopped badge updates in place AND any action button that
-                // was hidden while op_state == 'running' reappears now that the op is
-                // done — on success or failure alike.
-                action.doAction({ type: "ir.actions.client", tag: "soft_reload" });
+                // Every finished action refreshes the current view IN PLACE (data
+                // reload only — never a controller restore or full page load), so the
+                // running/stopped badge updates AND any button hidden while
+                // op_state == 'running' reappears, all WITHOUT leaving the current
+                // record. The form/list controllers listen for this on env.bus.
+                env.bus.trigger(SM_RELOAD);
             }
         });
     },

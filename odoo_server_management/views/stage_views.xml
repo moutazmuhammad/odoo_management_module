@@ -4,7 +4,7 @@
         <field name="name">server.stage.form</field>
         <field name="model">server.stage</field>
         <field name="arch" type="xml">
-            <form string="Stage">
+            <form string="Stage" js_class="server_mgmt_form">
                 <header>
                     <!-- Unrestricted copies so button attrs can read them for all groups.
                          can_act = False means: Client Server + current user is not Operator+. -->

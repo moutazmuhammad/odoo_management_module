@@ -5,7 +5,7 @@
         <field name="name">server.host.form</field>
         <field name="model">server.host</field>
         <field name="arch" type="xml">
-            <form string="Server Host">
+            <form string="Server Host" js_class="server_mgmt_form">
                 <header>
                     <button name="action_test_connection" type="object"
                             string="Test Connection" class="btn-info" icon="fa-plug"

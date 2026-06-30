@@ -39,6 +39,7 @@
     ],
     'assets': {
         'web.assets_backend': [
+            'odoo_server_management/static/src/js/stage_reload.js',
             'odoo_server_management/static/src/js/stage_autorefresh.js',
             'odoo_server_management/static/src/js/stage_ops.js',
         ],

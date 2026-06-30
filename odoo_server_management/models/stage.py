@@ -504,13 +504,15 @@ class Stage(models.Model):
         - reload=False (wizard buttons): act_window_close — shuts the wizard modal;
           closing it reloads the parent form, which then reads op_state == 'running'
           and hides the button (a harmless no-op for non-dialog buttons).
-        - reload=True (direct form buttons, e.g. discover/run-backup-now): soft_reload
-          — refreshes the current view in place so the just-started op_state ==
-          'running' hides the button immediately (there is no wizard to close).
+        - reload=True (direct form buttons, e.g. discover/run-backup-now):
+          server_mgmt_soft_reload — reloads the current record's DATA in place
+          (staying on the SAME record, unlike the core soft_reload which restores
+          the controller and can jump to a blank/new record) so the just-started
+          op_state == 'running' hides the button immediately.
 
-        The real result arrives later as a bus toast that soft-reloads again, so the
-        button reappears when the op finishes (see _run_bg / stage_ops.js)."""
-        nxt = ({'type': 'ir.actions.client', 'tag': 'soft_reload'} if reload
+        The real result arrives later as a bus toast that reloads in place again, so
+        the button reappears when the op finishes (see _run_bg / stage_ops.js)."""
+        nxt = ({'type': 'ir.actions.client', 'tag': 'server_mgmt_soft_reload'} if reload
                else {'type': 'ir.actions.act_window_close'})
         return {
             'type': 'ir.actions.client',
@@ -977,9 +979,10 @@ class Stage(models.Model):
     # ===========================
     def _notify(self, message):
         """Show a success notification that auto-dismisses (no X needed), then
-        soft-reload the view. `sticky=False` lets it fade like Odoo's own toasts;
-        `soft_reload` refreshes the current view/status without a full browser
-        reload."""
+        refresh the view IN PLACE. `sticky=False` lets it fade like Odoo's own
+        toasts; `server_mgmt_soft_reload` reloads the current record's data without
+        leaving it (unlike the core `soft_reload`, which restores the controller
+        and can bounce the user to a blank/new record)."""
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
@@ -988,6 +991,6 @@ class Stage(models.Model):
                 'title': _('Success'),
                 'message': message,
                 'sticky': False,
-                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+                'next': {'type': 'ir.actions.client', 'tag': 'server_mgmt_soft_reload'},
             },
         }
