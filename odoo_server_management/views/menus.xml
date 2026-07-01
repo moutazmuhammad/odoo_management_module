@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Root menu (children defined in the other view files).
-         Restricted to Administrator only: the whole app (and every child menu)
-         is hidden from Developer/Operational/DevOps. -->
-    <menuitem id="menu_server_management" name="Server Management" sequence="10"
-              groups="odoo_server_management.group_admin"/>
+    <!-- Root menu (children defined in the other view files) -->
+    <menuitem id="menu_server_management" name="Server Management" sequence="10"/>
+
+    <!-- Lock the global Odoo "Apps" menu (module manager) to Settings admins only.
+         In this DB it had lost its group and was visible to every internal user,
+         letting non-admins install/uninstall modules. Restore admin-only access. -->
+    <record id="base.menu_management" model="ir.ui.menu">
+        <field name="groups_id" eval="[(6, 0, [ref('base.group_system')])]"/>
+    </record>
 </odoo>
