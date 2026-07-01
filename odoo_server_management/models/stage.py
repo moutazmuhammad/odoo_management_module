@@ -23,10 +23,9 @@ _logger = logging.getLogger(__name__)
 SECRET_KEY_ENV = 'ODOO_SERVER_MGMT_KEY'
 
 # Role groups used for in-method authorization (defense in depth behind sudo()).
-# Hierarchy (each implies the previous): User -> Operator -> Administrator.
+# Hierarchy (each implies the previous): User -> DevOps -> Administrator.
 GROUP_USER = 'odoo_server_management.group_user'          # Developer: act on stages
-GROUP_OPERATOR = 'odoo_server_management.group_operator'  # Operational: + servers/discover/agent
-GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: everything except settings
+GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: servers/discover/agent + everything except settings
 GROUP_ADMIN = 'odoo_server_management.group_admin'        # Administrator: + General Settings
 
 # Keys whose values must never be written to ir.logging / process output.
@@ -96,7 +95,7 @@ class Stage(models.Model):
     @api.depends('client_stage')
     def _compute_can_act(self):
         is_operator = (self.env.su
-                       or self.env.user.has_group('odoo_server_management.group_operator'))
+                       or self.env.user.has_group('odoo_server_management.group_devops'))
         for rec in self:
             rec.can_act = (not rec.client_stage) or is_operator
 
@@ -445,9 +444,9 @@ class Stage(models.Model):
 
     def _check_action_access(self):
         """Gate an operational action: a **Client Server** instance may only be
-        acted on by Operators/Admins; a normal instance by any User."""
+        acted on by DevOps/Admins; a normal instance by any User."""
         self.ensure_one()
-        self._check_access(GROUP_OPERATOR if self.client_stage else GROUP_USER)
+        self._check_access(GROUP_DEVOPS if self.client_stage else GROUP_USER)
 
     # ===========================
     # Helpers
@@ -553,6 +552,38 @@ class Stage(models.Model):
             return True
         return self.sudo()._run_bg(_('Check status'),
                                    self._status_check_work(), reload=True)
+
+    def action_sync_domain_to_nginx(self):
+        """Push the manually-entered domain (Stage Name) into this instance's
+        nginx `server_name`, so the next Discover reads the corrected domain and
+        keeps THIS same stage instead of relabelling it from a wrong/IP
+        server_name. Backs up the vhost, validates with `nginx -t`, reloads."""
+        self.ensure_one()
+        self._check_access(GROUP_DEVOPS)
+        if not self.host_id:
+            raise UserError(_("This instance is not linked to a server."))
+        if not self.nginx_file:
+            raise UserError(_(
+                "No nginx file was detected for this instance, so there is "
+                "nothing to update. Run Discover first."))
+        domain = (self.name or '').strip()
+        # Must be a bare FQDN — not empty, not an IP, not IP:port, not a URL.
+        if not re.match(r'^(?=.{1,253}$)([A-Za-z0-9](-?[A-Za-z0-9])*\.)+[A-Za-z]{2,}$',
+                        domain):
+            raise UserError(_(
+                "Enter a valid domain in the Stage Name field first — e.g. "
+                "app.example.com — with no http://, port or path. Current "
+                "value: %s") % (domain or '(empty)'))
+        result = self.host_id._run(
+            'set_nginx_domain.yml',
+            extra_vars={'nginx_file': self.nginx_file, 'domain': domain,
+                        'discover_become': True})
+        if not result.get('success'):
+            raise UserError(_("Could not update nginx server_name:\n\n%s")
+                            % (result.get('output') or '')[-1200:])
+        return self.env['server.stage']._notify(
+            _("✅ nginx server_name set to %s and reloaded. Re-run Discover to "
+              "confirm it maps to this instance.") % domain)
 
     # ===========================
     # Background action runner (non-blocking actions with async result toasts)

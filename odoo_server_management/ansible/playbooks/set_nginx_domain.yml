@@ -1,0 +1,51 @@
+---
+# Overwrite one instance's nginx `server_name` with a manually-corrected domain,
+# so the NEXT discovery reads the right domain and keeps the same stage (instead
+# of relabelling it from a wrong/IP server_name).
+#
+# Editing files under /etc/nginx needs root, so become defaults to true here
+# (the SSH user has passwordless sudo). Safe: it backs the file up, validates
+# with `nginx -t`, and restores the backup if the new config is invalid.
+#
+# Required extra-vars: nginx_file (path), domain (bare FQDN).
+- hosts: all
+  gather_facts: no
+  become: "{{ discover_become | default(true) }}"
+  tasks:
+    - name: Refuse to run without the required inputs
+      assert:
+        that:
+          - nginx_file is defined and nginx_file | length > 0
+          - domain is defined and domain | length > 0
+        fail_msg: "nginx_file and domain are required"
+
+    - name: Point every server_name in this vhost at the corrected domain (backup first)
+      replace:
+        path: "{{ nginx_file }}"
+        regexp: '^(\s*server_name\s+)[^;]+;'
+        replace: '\1{{ domain }};'
+        backup: yes
+      register: repl
+
+    - name: Validate the nginx configuration
+      command: nginx -t
+      register: nginx_test
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Restore the backup if the new config is invalid
+      copy:
+        remote_src: yes
+        src: "{{ repl.backup_file }}"
+        dest: "{{ nginx_file }}"
+      when: nginx_test.rc != 0 and repl.backup_file is defined
+
+    - name: Fail clearly when the edit produced an invalid config
+      fail:
+        msg: "nginx config invalid after setting server_name; restored the original. nginx -t said: {{ nginx_test.stderr | default(nginx_test.stdout) }}"
+      when: nginx_test.rc != 0
+
+    - name: Reload nginx so the new server_name takes effect
+      command: systemctl reload nginx
+      when: nginx_test.rc == 0
+      changed_when: true
