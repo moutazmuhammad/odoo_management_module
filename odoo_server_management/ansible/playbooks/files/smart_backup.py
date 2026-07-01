@@ -29,9 +29,11 @@ Modes:
 import os
 import re
 import sys
+import time
 import glob
 import json
 import shlex
+import shutil
 import base64
 import zipfile
 import tempfile
@@ -776,12 +778,43 @@ def _upload_zip(zip_path, target):
             'upload_id': target.get('upload_id'), 'parts': parts}
 
 
+WORKDIR_NAME = 'odoo-backup-work'
+
+
+def _sweep_stale(workdir, max_age_s=3600):
+    """Delete leftovers from a PREVIOUS run that was killed (SIGKILL / timeout)
+    before its TemporaryDirectory / multipart-abort cleanup could run. Without
+    this, a killed run leaves a half-built zip or part on disk and backups would
+    accumulate on the server — the one place they must never be stored. Only
+    touches items older than `max_age_s` so a concurrent run is never disturbed."""
+    now = time.time()
+    for name in os.listdir(workdir):
+        p = os.path.join(workdir, name)
+        try:
+            if now - os.path.getmtime(p) < max_age_s:
+                continue
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.remove(p)
+        except OSError:
+            pass
+
+
 def _tmp_base():
-    """A disk-backed tmp dir with room for big zips (avoid /tmp which is often a
-    small tmpfs/RAM mount)."""
+    """A disk-backed, self-cleaning work dir with room for big zips (avoid /tmp,
+    often a small tmpfs/RAM mount). Everything a run writes goes UNDER this dir
+    and is deleted after upload; any stale leftovers from a killed run are swept
+    here so no backup is ever left stored on the server."""
     for d in (os.environ.get('ODOO_BACKUP_TMPDIR'), '/var/tmp', tempfile.gettempdir()):
         if d and os.path.isdir(d) and os.access(d, os.W_OK):
-            return d
+            work = os.path.join(d, WORKDIR_NAME)
+            try:
+                os.makedirs(work, exist_ok=True)
+                _sweep_stale(work)
+            except OSError:
+                continue
+            return work
     return None
 
 
