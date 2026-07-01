@@ -39,22 +39,46 @@ def load_conf(path=CONF):
     return cfg
 
 
+class _KeepPostRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow 301/302/303/307/308 while KEEPING the POST method + JSON body.
+
+    Python's default handler downgrades POST→GET on 301/302/303. The manager is
+    typically reached over http-by-IP (Host: <vhost>) and nginx answers with a
+    301 to https://<vhost>/…; the default behaviour would turn our POST into a
+    GET, which the POST-only JSON routes reject with 405/400 — so the agent could
+    never even fetch its DB list. We re-issue the SAME POST (body + headers) to
+    the redirect target instead."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if code not in (301, 302, 303, 307, 308):
+            return None
+        newheaders = {k: v for k, v in req.header_items()
+                      if k.lower() not in ('content-length',)}
+        return urllib.request.Request(
+            newurl, data=req.data, headers=newheaders,
+            origin_req_host=req.origin_req_host, unverifiable=True,
+            method='POST')
+
+
 def post(url, payload, insecure=False, host_header='', timeout=180):
     data = json.dumps({'jsonrpc': '2.0', 'method': 'call',
                        'params': payload}).encode()
     headers = {'Content-Type': 'application/json'}
     if host_header:
         # Reach the manager by IP but route to the right nginx vhost (avoids any
-        # DNS dependency on the managed servers).
+        # DNS dependency on the managed servers). Carried across the redirect too.
         headers['Host'] = host_header
-    req = urllib.request.Request(url, data=data, headers=headers)
-    ctx = None
-    if url.lower().startswith('https'):
-        ctx = ssl.create_default_context()
-        if insecure:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-    resp = json.loads(urllib.request.urlopen(req, timeout=timeout, context=ctx).read().decode())
+    # An ssl context is always prepared: even when `url` is http, the manager may
+    # 301 us to https, and the opener's HTTPS handler needs the (optionally
+    # insecure) context ready for that hop.
+    ctx = ssl.create_default_context()
+    if insecure:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    opener = urllib.request.build_opener(
+        _KeepPostRedirect(), urllib.request.HTTPSHandler(context=ctx))
+    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    resp = json.loads(opener.open(req, timeout=timeout).read().decode())
     if resp.get('error'):
         raise RuntimeError('manager error: %s' % resp['error'])
     result = resp.get('result') or {}

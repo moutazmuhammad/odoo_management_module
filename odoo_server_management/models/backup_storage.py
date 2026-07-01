@@ -183,6 +183,36 @@ class BackupStorage(models.AbstractModel):
         return deleted
 
     @api.model
+    def _has_recent_object(self, key_prefix, max_age_hours=48):
+        """True if ANY non-empty object under `key_prefix` was last modified within
+        `max_age_hours`. Used by the daily backup-existence monitor to confirm a
+        fresh backup actually landed in the Space (today or the day before)."""
+        import datetime
+        if not self._keys_set():
+            return False
+        cli = self._boto_client()
+        bucket = self._bucket()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        token = None
+        while True:
+            kw = {'Bucket': bucket, 'Prefix': key_prefix}
+            if token:
+                kw['ContinuationToken'] = token
+            resp = cli.list_objects_v2(**kw)
+            for obj in resp.get('Contents', []):
+                if not obj.get('Size'):
+                    continue
+                lm = obj['LastModified']
+                age_h = (now - lm).total_seconds() / 3600.0
+                if 0 <= age_h <= max_age_hours:
+                    return True
+            if resp.get('IsTruncated'):
+                token = resp.get('NextContinuationToken')
+            else:
+                break
+        return False
+
+    @api.model
     def _prune(self, key_prefix, retention_days=None):
         """Delete objects under `key_prefix` older than retention_days."""
         retention_days = self._retention_days() if retention_days is None else retention_days

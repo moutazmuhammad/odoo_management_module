@@ -51,6 +51,22 @@
         <field name="nextcall" eval="(DateTime.now().replace(hour=3, minute=0, second=0, microsecond=0) + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')"/>
     </record>
 
+    <!-- Daily safety net: confirm every server actually has a fresh backup object
+         in the bucket (today or the day before). Flags the server + its instances
+         for review (with disk/log reason) when a backup is missing. Runs at 08:00
+         so even large nightly backups have finished. -->
+    <record id="cron_verify_backups" model="ir.cron">
+        <field name="name">Server Management: Verify daily backups exist</field>
+        <field name="model_id" ref="model_server_host"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_verify_backups()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="numbercall">-1</field>
+        <field name="active" eval="True"/>
+        <field name="nextcall" eval="(DateTime.now().replace(hour=8, minute=0, second=0, microsecond=0) + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')"/>
+    </record>
+
     <!-- Ensure every reachable server has the self-backup agent installed
          (auto-covers newly added servers). Hourly; no-op once all are done. -->
     <record id="cron_ensure_agents" model="ir.cron">

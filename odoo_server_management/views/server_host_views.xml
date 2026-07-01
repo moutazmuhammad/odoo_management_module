@@ -35,6 +35,11 @@
                         <label for="name"/>
                         <h1><field name="name" placeholder="My Production Server"/></h1>
                     </div>
+                    <div class="alert alert-warning" role="alert"
+                         attrs="{'invisible': [('backup_review_needed', '=', False)]}">
+                        <strong>⚠️ Backup needs review — no recent backup found in the bucket.</strong>
+                        <field name="backup_review_reason" readonly="1" nolabel="1"/>
+                    </div>
                     <group>
                         <group string="Connection">
                             <field name="ip" placeholder="192.168.1.10" required="1"/>
@@ -51,7 +56,10 @@
                         <group string="Backups">
                             <field name="backup_category"/>
                             <field name="last_backup"/>
+                            <field name="last_backup_check"/>
+                            <field name="backup_review_needed" widget="boolean_toggle" readonly="1"/>
                             <field name="backup_agent_enabled" groups="odoo_server_management.group_devops"/>
+                            <field name="agent_version" groups="odoo_server_management.group_devops"/>
                             <field name="backup_extra_dbs" groups="odoo_server_management.group_devops"
                                    placeholder="db_one, db_two  (extra DBs for multi-DB / ambiguous stages)"/>
                         </group>

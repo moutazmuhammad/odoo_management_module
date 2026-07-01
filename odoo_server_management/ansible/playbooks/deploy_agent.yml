@@ -36,6 +36,7 @@
           token = {{ agent_token }}
           extra_dbs = {{ extra_dbs | default('') }}
           insecure = {{ insecure | default('0') }}
+          agent_version = {{ agent_version | default('') }}
 
     - name: Install daily cron
       copy:

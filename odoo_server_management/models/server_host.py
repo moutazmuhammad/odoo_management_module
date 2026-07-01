@@ -91,7 +91,23 @@ class ServerHost(models.Model):
         groups=GROUP_DEVOPS)
     agent_token = fields.Char(string='Agent Token', groups=GROUP_DEVOPS,
                               readonly=True, copy=False)
+    # Version of the deployed agent code. The ensure-agents cron redeploys any
+    # host whose stamp is older than _AGENT_VERSION so bug fixes reach live hosts.
+    agent_version = fields.Char(string='Agent Version', groups=GROUP_DEVOPS,
+                                readonly=True, copy=False)
     last_backup = fields.Datetime(string='Last Daily Backup', readonly=True)
+    # Set by the daily backup-existence monitor when no backup for this host has
+    # landed in the shared Space within the allowed window (today or the day
+    # before). The reason captures free disk + the agent log tail so an operator
+    # can see whether it is a space problem or a real failure.
+    backup_review_needed = fields.Boolean(
+        string='Backup Needs Review', readonly=True, copy=False,
+        help="No recent backup was found in the bucket for this server. See the "
+             "reason below (disk space / agent error).")
+    backup_review_reason = fields.Text(
+        string='Backup Review Reason', readonly=True, copy=False)
+    last_backup_check = fields.Datetime(
+        string='Last Backup Check', readonly=True, copy=False)
     stage_ids = fields.One2many('server.stage', 'host_id', string='Detected Instances')
     instance_count = fields.Integer(compute='_compute_instance_count')
 
@@ -415,6 +431,10 @@ class ServerHost(models.Model):
     # with pre-signed part URLs (512 MiB parts) so any size works, streamed.
     _BACKUP_SINGLE_LIMIT = 4 * 1024 ** 3
     _BACKUP_PART_SIZE = 512 * 1024 ** 2
+    # Bump whenever the deployed agent code (files/backup_agent.py or
+    # files/smart_backup.py) changes so the ensure-agents cron redeploys live
+    # hosts. v2: agent survives the manager's http->https 301 (kept POST body).
+    _AGENT_VERSION = '2'
 
     @staticmethod
     def _backup_norm(value):
@@ -730,10 +750,12 @@ class ServerHost(models.Model):
             'backup_hour': hour,
             'jitter': (self.id * 7) % 60,           # spread servers across the hour
             'extra_dbs': (self.backup_extra_dbs or '').replace('\n', ','),
+            'agent_version': self._AGENT_VERSION,
         })
         if not res.get('success'):
             raise UserError(_("Agent deploy failed:\n%s") % (res.get('output') or ''))
-        self.sudo().backup_agent_enabled = True
+        self.sudo().write({'backup_agent_enabled': True,
+                           'agent_version': self._AGENT_VERSION})
         return self.env['server.stage']._notify(
             _("✅ Self-backup agent installed on %s (daily at %02d:%02d, server "
               "time). The manager will no longer back this host up itself.")
@@ -750,8 +772,13 @@ class ServerHost(models.Model):
             return
         if not self.env['server.backup.storage']._keys_set():
             return
-        hosts = self.search([('key_authorized', '=', True),
-                             ('backup_agent_enabled', '=', False)])
+        # Install on hosts that don't have the agent yet, AND redeploy hosts whose
+        # deployed agent code is older than the current version (so fixes — e.g.
+        # the http->https redirect fix — reach already-enrolled servers).
+        hosts = self.search([
+            ('key_authorized', '=', True),
+            '|', ('backup_agent_enabled', '=', False),
+                 ('agent_version', '!=', self._AGENT_VERSION)])
         for host in hosts:
             try:
                 host.action_deploy_agent()
@@ -798,6 +825,124 @@ class ServerHost(models.Model):
             except Exception:
                 self.env.cr.rollback()
                 _logger.exception("Daily backup failed for host %s", host.id)
+
+    def _backup_prefixes(self):
+        """Every bucket prefix a backup for THIS host could live under: the
+        current <category>/<server-name>/ layout plus the legacy IP-based folders
+        (dotted + old dashed), so a host that predates the server-name layout is
+        still recognised as having a recent backup."""
+        self.ensure_one()
+        Storage = self.env['server.backup.storage']
+        category = self.backup_category or 'odex'
+        segs = [self._backup_server_seg(), self._backup_host_seg(self.ip),
+                (self.ip or '').replace('.', '-')]
+        prefixes, seen = [], set()
+        for seg in segs:
+            if seg and seg not in seen:
+                seen.add(seg)
+                prefixes.append(Storage._object_key([category, seg]) + '/')
+        return prefixes
+
+    def _diagnose_backup_gap(self):
+        """SSH-probe this host to explain why no recent backup exists: free disk on
+        the scratch/backup paths, whether the agent + cron are installed, and the
+        tail of the agent log. Returns a human-readable reason string (never
+        raises — a probe failure is itself part of the reason)."""
+        self.ensure_one()
+        try:
+            res = self._run('backup_probe.yml', timeout=120)
+        except Exception as exc:  # noqa: BLE001
+            return _("Could not probe the server (SSH/ansible error): %s") % (
+                str(exc)[:300])
+        if not res.get('success'):
+            return _("Server unreachable for probe (SSH failed):\n%s") % (
+                (res.get('output') or '')[:500])
+        info = self._parse_backup_json(res.get('output'), 'ODOO_BACKUPPROBE_JSON:')
+        if not info:
+            return _("Backup missing; server probe returned no data.")
+        lines = []
+        disk = info.get('disk') or {}
+        low = [p for p, d in disk.items()
+               if isinstance(d, dict) and (d.get('free_gb') or 0) < 5]
+        disk_txt = ", ".join(
+            "%s: %sGB free (%s%% used)" % (p, d.get('free_gb'), d.get('pct_used'))
+            for p, d in disk.items() if isinstance(d, dict))
+        if low:
+            lines.append(_("⚠️ LOW DISK on %s — free up space (a backup needs room "
+                           "for one ~512 MiB part at a time).") % ", ".join(low))
+        if disk_txt:
+            lines.append(_("Disk: %s") % disk_txt)
+        if not info.get('agent_installed'):
+            lines.append(_("The self-backup agent is not installed "
+                           "(/opt/odoo-backup/agent.py missing)."))
+        if not info.get('cron_installed'):
+            lines.append(_("The daily cron is not installed "
+                           "(/etc/cron.d/odoo-backup missing)."))
+        tail = (info.get('log_tail') or '').strip()
+        if tail:
+            lines.append(_("Agent log tail:\n%s") % tail[-1200:])
+        else:
+            lines.append(_("No agent log yet (/var/log/odoo-backup.log) — the "
+                           "nightly run may never have started."))
+        return "\n".join(lines)
+
+    @api.model
+    def _cron_verify_backups(self):
+        """Daily safety net: make sure EVERY server has a fresh backup object in the
+        shared Space (today or the day before). If a host's most recent backup is
+        older than the allowed window, flag the host (backup_review_needed + a
+        reason that includes free disk + the agent log) and mark its instances as
+        'Needs Review'. When a fresh backup reappears, the flags auto-clear.
+
+        This catches silent failures the per-host cron can't see — e.g. the agent
+        failing every night — because it checks the bucket itself, the one place a
+        real backup must show up."""
+        Storage = self.env['server.backup.storage']
+        if not Storage._keys_set():
+            return
+        ICP = self.env['ir.config_parameter'].sudo()
+        try:
+            max_age = int(ICP.get_param('server.backup.max_age_hours', default='48'))
+        except (TypeError, ValueError):
+            max_age = 48
+        max_age = max(24, max_age)          # never alert before a full day passes
+        now = fields.Datetime.now()
+        for host in self.search([('key_authorized', '=', True)]):
+            try:
+                # Nothing to expect if the host has no databases to back up.
+                if not host._backup_targets():
+                    if host.backup_review_needed:
+                        host.write({'backup_review_needed': False,
+                                    'backup_review_reason': False,
+                                    'last_backup_check': now})
+                    self.env.cr.commit()
+                    continue
+                recent = any(Storage._has_recent_object(p, max_age_hours=max_age)
+                             for p in host._backup_prefixes())
+                if recent:
+                    vals = {'last_backup_check': now}
+                    if host.backup_review_needed:
+                        vals.update({'backup_review_needed': False,
+                                     'backup_review_reason': False})
+                        # Clear only the review flags this monitor raised.
+                        host.stage_ids.sudo().filtered('needs_review').write(
+                            {'needs_review': False})
+                    host.write(vals)
+                else:
+                    reason = host._diagnose_backup_gap()
+                    header = _("No backup found in the bucket for '%s' in the last "
+                               "%sh (checked %s).") % (
+                        host.name, max_age, ", ".join(host._backup_prefixes()))
+                    host.write({'backup_review_needed': True,
+                                'backup_review_reason': header + "\n\n" + reason,
+                                'last_backup_check': now})
+                    host.stage_ids.sudo().write({'needs_review': True})
+                    _logger.warning("Backup monitor: host %s has NO recent backup",
+                                    host.name)
+                self.env.cr.commit()
+            except Exception:
+                self.env.cr.rollback()
+                _logger.exception("Backup verify failed for host %s", host.id)
 
     def action_discover(self):
         """Detect every Odoo service on the host and sync stages — in the BACKGROUND.
