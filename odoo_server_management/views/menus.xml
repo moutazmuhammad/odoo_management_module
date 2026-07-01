@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Root menu (children defined in the other view files) -->
-    <menuitem id="menu_server_management" name="Server Management" sequence="10"/>
+    <!-- Root menu (children defined in the other view files).
+         Restricted to Administrator only: the whole app (and every child menu)
+         is hidden from Developer/Operational/DevOps. -->
+    <menuitem id="menu_server_management" name="Server Management" sequence="10"
+              groups="odoo_server_management.group_admin"/>
 </odoo>
