@@ -109,12 +109,15 @@ def main():
         if db and db not in have:
             targets.append({'db': db, 'domain': '', 'port': ''})
             have.add(db)
-    items = sb._size_targets(targets)
-    # Optional targeted run (testing / manual): ODOO_BACKUP_ONLY=db1,db2
+    # Optional targeted run (testing / manual): ODOO_BACKUP_ONLY=db1,db2. Filter
+    # BEFORE sizing so a targeted run doesn't `du` every DB's filestore (a full
+    # host may have dozens of DBs / ~1 TB — sizing all of them just to back up one
+    # would take minutes for nothing).
     only = [x.strip() for x in os.environ.get('ODOO_BACKUP_ONLY', '').split(',')
             if x.strip()]
     if only:
-        items = [it for it in items if it['db'] in only]
+        targets = [t for t in targets if t.get('db') in only]
+    items = sb._size_targets(targets)
     if not items:
         print('backup-agent: no databases to back up')
         return
