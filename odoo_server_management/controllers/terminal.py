@@ -7,7 +7,7 @@ from odoo.http import request
 from odoo.exceptions import AccessError
 
 GROUP_ADMIN = 'odoo_server_management.group_admin'
-GROUP_OPERATOR = 'odoo_server_management.group_operator'  # implied by admin
+GROUP_DEVOPS = 'odoo_server_management.group_devops'  # implied by admin
 TOKEN_TTL = 300  # seconds — headroom for page load + minor clock skew
 
 
@@ -22,7 +22,7 @@ class ServerTerminalController(http.Controller):
 
     def _admin_host(self, host_id):
         # Operator+ may open the terminal (admin implies operator).
-        if not request.env.user.has_group(GROUP_OPERATOR):
+        if not request.env.user.has_group(GROUP_DEVOPS):
             raise AccessError(_("Only operators or administrators can open a server terminal."))
         host = request.env['server.host'].sudo().browse(host_id).exists()
         if not host:

@@ -13,22 +13,14 @@
         <field name="category_id" ref="group_category_project_roles"/>
     </record>
 
-    <!-- Operational: a Developer who can also manage Servers (create), run
-         Discover Instances and Install Self-Backup Agent, and act on Client
-         Server stages. -->
-    <record id="group_operator" model="res.groups">
-        <field name="name">Operational</field>
-        <field name="category_id" ref="group_category_project_roles"/>
-        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
-    </record>
-
-    <!-- DevOps: everything EXCEPT the General Settings menu — all server buttons
-         (Test Connection, Check Status, Terminal, Run Backup Now), all stage
-         pages (General/Access Info, secrets, conf), repository management. -->
+    <!-- DevOps: everything EXCEPT the General Settings menu — manage Servers
+         (create), run Discover Instances, Install Self-Backup Agent, act on
+         Client Server stages, all server buttons (Test Connection, Check Status,
+         Terminal, Run Backup Now), all stage pages, repository management. -->
     <record id="group_devops" model="res.groups">
         <field name="name">DevOps</field>
         <field name="category_id" ref="group_category_project_roles"/>
-        <field name="implied_ids" eval="[(4, ref('group_operator'))]"/>
+        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
     </record>
 
     <!-- Administrator: DevOps + the global General Settings. -->
@@ -38,15 +30,9 @@
         <field name="implied_ids" eval="[(4, ref('group_devops'))]"/>
     </record>
 
-    <!-- Record rules: a "DevOps Only" server (and its instances) is visible only
-         to DevOps/Admins. Group rules are OR-combined, so a DevOps user (who is
-         also Operational) sees everything; an Operational-only user does not. -->
-    <record id="rule_host_operational" model="ir.rule">
-        <field name="name">Servers: Operational hides DevOps-only</field>
-        <field name="model_id" ref="model_server_host"/>
-        <field name="domain_force">[('devops_only', '=', False)]</field>
-        <field name="groups" eval="[(4, ref('group_operator'))]"/>
-    </record>
+    <!-- Record rules: a "DevOps Only" server's instances are hidden from plain
+         Developers (see rule_stage_developer). Servers themselves are only
+         visible to DevOps/Admins, who see all of them. -->
     <record id="rule_host_devops_all" model="ir.rule">
         <field name="name">Servers: DevOps see all</field>
         <field name="model_id" ref="model_server_host"/>

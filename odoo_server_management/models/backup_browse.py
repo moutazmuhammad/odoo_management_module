@@ -4,7 +4,7 @@ import logging
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError, AccessError
 
-from .stage import GROUP_USER, GROUP_OPERATOR
+from .stage import GROUP_USER, GROUP_DEVOPS
 
 _logger = logging.getLogger(__name__)
 
@@ -238,7 +238,7 @@ class BackupFile(models.TransientModel):
         self.ensure_one()
         # Client-server backups: Operators/Admins only. Re-check from the key.
         if self._is_client_key(self.key):
-            self.env['server.stage']._check_access(GROUP_OPERATOR)
+            self.env['server.stage']._check_access(GROUP_DEVOPS)
         else:
             self.env['server.stage']._check_access(GROUP_USER)
         url = self.env['server.backup.storage']._presign_get(

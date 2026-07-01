@@ -12,7 +12,7 @@ from psycopg2 import errorcodes
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError, AccessError, ValidationError
 
-from .stage import GROUP_OPERATOR, GROUP_DEVOPS, GROUP_ADMIN
+from .stage import GROUP_DEVOPS, GROUP_ADMIN
 
 _logger = logging.getLogger(__name__)
 
@@ -42,13 +42,12 @@ class ServerHost(models.Model):
         default=lambda s: s.env['server.stage']._default_ssh_port(),
     )
     notes = fields.Text(string='Notes')
-    # When set, this server and all its instances/details are visible ONLY to
-    # DevOps and Administrators (enforced by record rules). Operational users
-    # cannot see or access it at all.
+    # When set, this server's instances are hidden from plain Developers
+    # (enforced by record rules); servers are DevOps/Admin-only regardless.
     devops_only = fields.Boolean(
         string='DevOps Only', groups=GROUP_DEVOPS, default=False,
-        help="Restrict this server (and its instances) to DevOps and "
-             "Administrators only — Operational users cannot see it.")
+        help="Hide this server's instances from plain Developers (Servers "
+             "themselves are already DevOps/Administrator only).")
     # Admin-only: enable the daily auto-stop job for this server. Off by default.
     auto_stop_enabled = fields.Boolean(
         string='Stop Instances', groups=GROUP_DEVOPS, default=False,
@@ -707,7 +706,7 @@ class ServerHost(models.Model):
         server then backs itself up (presign-on-demand) with NO secret stored
         locally — the manager identifies the agent by its source IP — and the
         manager's daily cron skips this host afterwards."""
-        self.env['server.stage']._check_access(GROUP_OPERATOR)
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         self._require_key()
         Storage = self.env['server.backup.storage']
@@ -940,7 +939,7 @@ class ServerHost(models.Model):
         error. So the click returns immediately and the work runs in a worker thread
         that commits its DB sync and pushes the result (counts, or the error) to the
         user as a bus toast. The outcome is also persisted on the host (op_* fields)."""
-        self.env['server.stage']._check_access(GROUP_OPERATOR)
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         self._require_key()
         self.sudo().write({'op_label': _('Discover server'), 'op_state': 'running',
