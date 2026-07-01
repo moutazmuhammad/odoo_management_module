@@ -214,6 +214,46 @@ fi
 # should remain on managed servers. Remove them.
 log "5. Removing s3cmd/aws creds and S3 backup cron jobs (now pre-signed, credential-free)"
 
+# Comment out crontab lines matching $1 for EVERY user's personal crontab (not just
+# root), using the supported 'crontab -u' mechanism so cron reloads on all distros
+# and we never leave stray files inside the spool dir. $2 = human label for logs,
+# $3 = regex a referenced script must also match before we chmod -x it (defaults to $1).
+# Originals are saved under /var/backups/harden/crontab.<user>.bak.harden.
+harden_all_user_crontabs(){
+  local re="$1" what="$2" script_re="${3:-$1}"
+  command -v crontab >/dev/null 2>&1 || return 0
+  install -d -m 700 /var/backups/harden 2>/dev/null || true
+  # Every account that could own a crontab: spool entries + all of /etc/passwd.
+  { for sp in /var/spool/cron/crontabs/* /var/spool/cron/*; do
+      [ -f "$sp" ] && basename "$sp"
+    done
+    cut -d: -f1 /etc/passwd
+  } 2>/dev/null | sort -u | while read -r u; do
+    [ -n "$u" ] || continue
+    case "$u" in *.bak.harden) continue ;; esac
+    getent passwd "$u" >/dev/null 2>&1 || continue
+    cur="$(crontab -l -u "$u" 2>/dev/null)" || continue
+    [ -n "$cur" ] || continue
+    # Skip if every matching line in this user's crontab is already commented.
+    printf '%s\n' "$cur" | grep -iE "$re" | grep -qvE '^[[:space:]]*#' || continue
+    printf '%s\n' "$cur" > "/var/backups/harden/crontab.$u.bak.harden" 2>/dev/null || true
+    # Disable the invoked scripts (chmod -x) when they clearly match.
+    printf '%s\n' "$cur" | grep -iE "$re" | grep -vE '^[[:space:]]*#' \
+      | grep -oE '/[A-Za-z0-9_./-]+\.(sh|py|bash)' | sort -u | while read -r scr; do
+      if [ -f "$scr" ] && grep -qiE "$script_re" "$scr" 2>/dev/null; then
+        chmod -x "$scr" 2>/dev/null && echo "  disabled $what script referenced by ${u}'s crontab (chmod -x): $scr"
+      fi
+    done
+    # Reinstall the crontab with matching lines commented out (via crontab -u so
+    # cron picks it up immediately, regardless of spool-dir layout).
+    if printf '%s\n' "$cur" | sed -r "/($re)/I{/^[[:space:]]*#/!s/^/#/}" | crontab -u "$u" - 2>/dev/null; then
+      echo "  commented out $what cron lines in ${u}'s crontab"
+    else
+      echo "  WARNING: could not rewrite ${u}'s crontab (left unchanged)"
+    fi
+  done
+}
+
 # 5a. Object-storage credential files for every user (these hold access/secret keys).
 for f in /root/.s3cfg /etc/s3cfg /home/*/.s3cfg \
          /root/.aws/credentials /home/*/.aws/credentials \
@@ -226,8 +266,9 @@ done
 # 5b. Backup cron jobs that reference s3cmd/.s3cfg/Spaces — disable the invoked
 #     scripts (when they're clearly S3 backup scripts) and comment out the cron lines.
 PAT='s3cmd|\.s3cfg|digitaloceanspaces|aws s3'
-for cf in /etc/crontab /etc/cron.d/* /etc/cron.hourly/* /etc/cron.daily/* \
-          /var/spool/cron/crontabs/* /var/spool/cron/*; do
+# System crontab files (root-run). Per-user crontabs are handled below via
+# harden_all_user_crontabs so we don't edit spool files in place.
+for cf in /etc/crontab /etc/cron.d/* /etc/cron.hourly/* /etc/cron.daily/*; do
   [ -f "$cf" ] || continue
   case "$cf" in *.bak.harden) continue ;; esac
   grep -qiE "$PAT" "$cf" 2>/dev/null || continue
@@ -243,6 +284,8 @@ for cf in /etc/crontab /etc/cron.d/* /etc/cron.hourly/* /etc/cron.daily/* \
   sed -ri "/($PAT)/I{/^[[:space:]]*#/!s/^/#/}" "$cf"
   echo "  commented out S3 backup cron lines in: $cf"
 done
+# Same for EVERY user's personal crontab (not just root).
+harden_all_user_crontabs "$PAT" "S3 backup" 's3cmd|secret_key|access_key|digitaloceanspaces'
 
 # 5c. Report (do NOT auto-delete) leftover S3 BACKUP scripts/configs. Narrow to a
 #     strong signal (the Spaces endpoint or an s3cmd host_base) in shell/config
@@ -273,10 +316,10 @@ if [ -d /etc/cron.daily ]; then
   done
 fi
 
-# Comment out (do NOT delete) daily backup lines in every crontab-style file
-# (system + per-user 'crontab -e' spools). Originals saved as *.bak.harden.
-for cf in /etc/crontab /etc/cron.d/* \
-          /var/spool/cron/crontabs/* /var/spool/cron/*; do
+# Comment out (do NOT delete) daily backup lines in the system crontab files.
+# Per-user crontabs are handled below via harden_all_user_crontabs.
+# Originals saved as *.bak.harden.
+for cf in /etc/crontab /etc/cron.d/*; do
   [ -f "$cf" ] || continue
   case "$cf" in *.bak.harden) continue ;; esac
   grep -qiE "$BACKUP_RE" "$cf" 2>/dev/null || continue
@@ -294,6 +337,8 @@ for cf in /etc/crontab /etc/cron.d/* \
   sed -ri "/(${BACKUP_RE})/I{/^[[:space:]]*#/!s/^/#/}" "$cf"
   echo "  commented out backup cron lines in: $cf"
 done
+# Same for EVERY user's personal crontab (not just root).
+harden_all_user_crontabs "$BACKUP_RE" "backup"
 echo "  done commenting backup cron jobs (originals saved as *.bak.harden)"
 
 # 5e. Show each user's live crontab (via 'crontab -l -u') so you can confirm exactly
