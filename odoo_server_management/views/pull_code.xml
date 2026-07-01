@@ -85,20 +85,20 @@
     <menuitem id="menu_repo_management"
               name="Repository Management"
               parent="menu_server_management"
-              sequence="1" groups="odoo_server_management.group_devops"/>
+              sequence="1" groups="-odoo_server_management.group_devops,odoo_server_management.group_admin"/>
 
     <!-- Child Menus under Repository Management -->
     <menuitem id="menu_git_repositories"
               name="Git Repositories"
               parent="menu_repo_management"
               action="action_server_repository"
-              sequence="1"/>
+              sequence="1" groups="odoo_server_management.group_admin"/>
 
     <menuitem id="menu_stage_repo_paths"
               name="Stage Repo Paths"
               parent="menu_repo_management"
               action="action_stage_repo_branch_path"
-              sequence="2"/>
+              sequence="2" groups="odoo_server_management.group_admin"/>
 
 </odoo>
 

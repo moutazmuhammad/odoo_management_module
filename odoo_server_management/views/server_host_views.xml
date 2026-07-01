@@ -141,5 +141,5 @@
     <menuitem id="menu_server_hosts" name="Servers"
               parent="menu_server_management"
               action="action_server_host" sequence="15"
-              groups="odoo_server_management.group_operator"/>
+              groups="-odoo_server_management.group_operator,odoo_server_management.group_admin"/>
 </odoo>
