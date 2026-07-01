@@ -88,6 +88,13 @@ def post(url, payload, insecure=False, host_header='', timeout=180):
 
 
 def main():
+    # Line-buffer stdout so progress ("<db> uploaded") appears in
+    # /var/log/odoo-backup.log LIVE. Python block-buffers when stdout is a file
+    # (not a TTY), which otherwise makes a long run look stalled until it exits.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:  # noqa: BLE001 — older Python; not fatal
+        pass
     cfg = load_conf()
     base = cfg['manager_url'].rstrip('/')
     # No secret is stored on this server: the manager identifies us by source IP.
