@@ -40,21 +40,31 @@ def list_for(conf, odoo_user):
         "WHERE NOT d.datistemplate AND d.datallowconn AND r.rolname = '%s' "
         "ORDER BY d.datname" % db_user.replace("'", "''")
     )
-    # -w: never prompt for a password (would hang with no tty); short connect
-    # timeout so an unreachable/auth-failing attempt fails fast and we try the next.
-    base = ['psql', '-w', '-U', shlex.quote(db_user), '-d', 'postgres', '-tA']
-    if is_set(db_host):
-        base += ['-h', shlex.quote(db_host)]
-    if is_set(db_port):
-        base += ['-p', shlex.quote(db_port)]
-    psql = 'PGCONNECT_TIMEOUT=5 ' + ' '.join(base) + ' -c ' + shlex.quote(query)
 
+    def _psql(host):
+        # -w: never prompt for a password (would hang with no tty); short connect
+        # timeout so an unreachable/auth-failing attempt fails fast.
+        base = ['psql', '-w', '-U', shlex.quote(db_user), '-d', 'postgres', '-tA']
+        if host:
+            base += ['-h', shlex.quote(host)]
+        if is_set(db_port):
+            base += ['-p', shlex.quote(db_port)]
+        return 'PGCONNECT_TIMEOUT=5 ' + ' '.join(base) + ' -c ' + shlex.quote(query)
+
+    # Connection variants in priority order: localhost:<port> first (per requirement),
+    # then the local socket/peer (sudo as the odoo user), then the conf's db_host for
+    # genuinely remote DBs. Each is tried with sudo-as-odoo-user / PGPASSWORD / plain.
+    hosts = ['127.0.0.1', '']
+    if is_set(db_host) and db_host not in ('localhost', '127.0.0.1', '::1'):
+        hosts.append(db_host)
     attempts = []
-    if odoo_user:
-        attempts.append('sudo -n -u %s bash -lc %s' % (shlex.quote(odoo_user), shlex.quote(psql)))
-    if is_set(db_password):
-        attempts.append('PGPASSWORD=%s %s' % (shlex.quote(db_password), psql))
-    attempts.append(psql)
+    for h in hosts:
+        psql = _psql(h)
+        if odoo_user:
+            attempts.append('sudo -n -u %s bash -lc %s' % (shlex.quote(odoo_user), shlex.quote(psql)))
+        if is_set(db_password):
+            attempts.append('PGPASSWORD=%s %s' % (shlex.quote(db_password), psql))
+        attempts.append(psql)
 
     out = ''
     for a in attempts:

@@ -1,0 +1,69 @@
+---
+# Install the standalone self-backup agent + a daily Linux cron on a managed
+# server. No Spaces key is written here — only the manager URL and a low-
+# privilege per-host token. The agent fetches short-lived upload URLs at run time.
+- hosts: all
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Create agent directory
+      file:
+        path: /opt/odoo-backup
+        state: directory
+        mode: '0755'
+
+    - name: Install detection/upload helper
+      copy:
+        src: files/smart_backup.py
+        dest: /opt/odoo-backup/smart_backup.py
+        mode: '0755'
+
+    - name: Install backup agent
+      copy:
+        src: files/backup_agent.py
+        dest: /opt/odoo-backup/agent.py
+        mode: '0755'
+
+    - name: Write agent config (NO secret — the manager identifies us by source IP)
+      copy:
+        dest: /etc/odoo-backup.conf
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          # No secret is stored here. The manager authenticates this agent by its
+          # source IP (recorded as the host's IP); it only ever hands back
+          # short-lived pre-signed upload URLs at run time.
+          manager_url = {{ manager_url }}
+          host_header = {{ host_header | default('') }}
+          extra_dbs = {{ extra_dbs | default('') }}
+          insecure = {{ insecure | default('0') }}
+          agent_version = {{ agent_version | default('') }}
+
+    - name: Install daily cron
+      copy:
+        dest: /etc/cron.d/odoo-backup
+        mode: '0644'
+        content: |
+          # Odoo self-backup agent — daily at {{ '%02d'|format(backup_hour|int) }}:{{ '%02d'|format(jitter|int) }} (server time)
+          SHELL=/bin/bash
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          {{ jitter|int }} {{ backup_hour|int }} * * * root /usr/bin/python3 /opt/odoo-backup/agent.py >> /var/log/odoo-backup.log 2>&1
+
+    - name: Rotate the agent log so it never grows unbounded
+      copy:
+        dest: /etc/logrotate.d/odoo-backup
+        mode: '0644'
+        content: |
+          /var/log/odoo-backup.log {
+              daily
+              rotate 2
+              compress
+              missingok
+              notifempty
+              copytruncate
+          }
+
+    - name: Report
+      debug:
+        msg: "agent installed; daily at {{ backup_hour }}:{{ jitter }}"

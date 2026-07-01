@@ -5,8 +5,9 @@
 import { ListController } from "@web/views/list/list_controller";
 import { listView } from "@web/views/list/list_view";
 import { registry } from "@web/core/registry";
-import { useService } from "@web/core/utils/hooks";
+import { useBus, useService } from "@web/core/utils/hooks";
 import { onWillUnmount } from "@odoo/owl";
+import { SM_RELOAD } from "@odoo_server_management/js/stage_reload";
 
 const REFRESH_MS = 30000;
 
@@ -17,6 +18,21 @@ export class ServerStageListController extends ListController {
         this._ssBusy = false;
         this._ssTimer = setInterval(() => this._ssAutoRefresh(), REFRESH_MS);
         onWillUnmount(() => clearInterval(this._ssTimer));
+        // Finished op → reload the visible rows in place (no record jump), so the
+        // status badge updates immediately instead of waiting up to 30s.
+        useBus(this.env.bus, SM_RELOAD, () => this._ssReloadInPlace());
+    }
+
+    async _ssReloadInPlace() {
+        // Skip while the user is editing a row, to avoid discarding their input.
+        if (this._ssBusy || (this.model.root && this.model.root.editedRecord)) {
+            return;
+        }
+        try {
+            await this.model.root.load();
+        } catch (e) {
+            // A transient reload error must not break the open list.
+        }
     }
 
     async _ssAutoRefresh() {

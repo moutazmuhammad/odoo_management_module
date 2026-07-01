@@ -6,27 +6,65 @@
         <field name="description">Access levels for the Server Management module</field>
     </record>
 
-    <!-- User: can perform operational actions on instances, but does not see
-         sensitive details (passwords, paths, conf) nor manage servers. -->
+    <!-- Developer: act on (non-client) instances; see only Branch Configuration
+         + Backups + the action buttons. No servers, no settings, no secrets. -->
     <record id="group_user" model="res.groups">
-        <field name="name">User</field>
+        <field name="name">Developer</field>
         <field name="category_id" ref="group_category_project_roles"/>
     </record>
 
-    <!-- Operator: a User who can also see the Servers and run Discovery / Test
-         Connection (onboard and refresh hosts). -->
+    <!-- Operational: a Developer who can also manage Servers (create), run
+         Discover Instances and Install Self-Backup Agent, and act on Client
+         Server stages. -->
     <record id="group_operator" model="res.groups">
-        <field name="name">Operator</field>
+        <field name="name">Operational</field>
         <field name="category_id" ref="group_category_project_roles"/>
         <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
     </record>
 
-    <!-- Administrator: an Operator who can also see every detail (secrets,
-         paths, conf) and manage the global Settings. -->
+    <!-- DevOps: everything EXCEPT the General Settings menu — all server buttons
+         (Test Connection, Check Status, Terminal, Run Backup Now), all stage
+         pages (General/Access Info, secrets, conf), repository management. -->
+    <record id="group_devops" model="res.groups">
+        <field name="name">DevOps</field>
+        <field name="category_id" ref="group_category_project_roles"/>
+        <field name="implied_ids" eval="[(4, ref('group_operator'))]"/>
+    </record>
+
+    <!-- Administrator: DevOps + the global General Settings. -->
     <record id="group_admin" model="res.groups">
         <field name="name">Administrator</field>
         <field name="category_id" ref="group_category_project_roles"/>
-        <field name="implied_ids" eval="[(4, ref('group_operator'))]"/>
+        <field name="implied_ids" eval="[(4, ref('group_devops'))]"/>
+    </record>
+
+    <!-- Record rules: a "DevOps Only" server (and its instances) is visible only
+         to DevOps/Admins. Group rules are OR-combined, so a DevOps user (who is
+         also Operational) sees everything; an Operational-only user does not. -->
+    <record id="rule_host_operational" model="ir.rule">
+        <field name="name">Servers: Operational hides DevOps-only</field>
+        <field name="model_id" ref="model_server_host"/>
+        <field name="domain_force">[('devops_only', '=', False)]</field>
+        <field name="groups" eval="[(4, ref('group_operator'))]"/>
+    </record>
+    <record id="rule_host_devops_all" model="ir.rule">
+        <field name="name">Servers: DevOps see all</field>
+        <field name="model_id" ref="model_server_host"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="groups" eval="[(4, ref('group_devops'))]"/>
+    </record>
+
+    <record id="rule_stage_developer" model="ir.rule">
+        <field name="name">Stages: hide instances of DevOps-only servers</field>
+        <field name="model_id" ref="model_server_stage"/>
+        <field name="domain_force">['|', ('host_id', '=', False), ('host_id.devops_only', '=', False)]</field>
+        <field name="groups" eval="[(4, ref('group_user'))]"/>
+    </record>
+    <record id="rule_stage_devops_all" model="ir.rule">
+        <field name="name">Stages: DevOps see all</field>
+        <field name="model_id" ref="model_server_stage"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="groups" eval="[(4, ref('group_devops'))]"/>
     </record>
 
 </odoo>

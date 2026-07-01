@@ -8,7 +8,11 @@
             <form string="Pull Code">
                 <group>
                     <field name="stage_id" readonly="1"/>
+                    <field name="repository_id" invisible="1"/>
                     <field name="repo_branch_path_id" options="{'no_create': True}"/>
+                    <field name="branch_id" options="{'no_create': True}"
+                           attrs="{'invisible': [('repo_branch_path_id', '=', False)]}"
+                           help="Pick any branch of the repository to pull (defaults to the deployed one)."/>
                 </group>
                 <footer>
                     <button name="action_confirm_pull"

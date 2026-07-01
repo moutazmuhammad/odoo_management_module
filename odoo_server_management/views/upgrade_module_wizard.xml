@@ -8,8 +8,23 @@
           <form string="Upgrade Module">
               <group>
                   <field name="stage_id" invisible="1"/>
-                  <field name="database_name"/>
-                  <field name="module_name"/>
+                  <field name="database_source" widget="radio" options="{'horizontal': True}"/>
+                  <field name="database_pick" options="{'no_create': True, 'no_open': True}"
+                         attrs="{'invisible': [('database_source', '!=', 'select')],
+                                 'required': [('database_source', '=', 'select')]}"/>
+                  <field name="database_name" placeholder="e.g. odex25_rajhi_dev_db"
+                         attrs="{'invisible': [('database_source', '!=', 'manual')],
+                                 'required': [('database_source', '=', 'manual')]}"/>
+                  <field name="module_source" widget="radio" options="{'horizontal': True}"/>
+                  <field name="module_pick" options="{'no_create': True, 'no_open': True}"
+                         attrs="{'invisible': [('module_source', '!=', 'select')]}"/>
+                  <!-- Select mode: read-only, built up by 'Add module'. Manual mode: free text. -->
+                  <field name="module_names"
+                         placeholder="e.g. odex25_account, account, sale"
+                         attrs="{'readonly': [('module_source', '=', 'select')],
+                                 'required': [('module_source', '=', 'manual')],
+                                 'invisible': [('module_source', '=', 'select'),
+                                               ('module_names', '=', False)]}"/>
               </group>
               <footer>
                   <button string="Upgrade" type="object" name="action_upgrade" class="btn-primary"/>

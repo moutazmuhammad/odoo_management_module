@@ -15,7 +15,19 @@ class ServerBackupDatabaseWizard(models.TransientModel):
     _description = 'Backup Odoo Database Wizard'
 
     stage_id = fields.Many2one('server.stage', string='Stage', required=True, readonly=True)
-    db_name = fields.Selection(selection='_sel_databases', string='Database', required=True)
+    # The user does ONE thing: either pick the database from the discovered list
+    # (db_source='select') OR type it (db_source='manual') — never both.
+    db_source = fields.Selection(
+        [('select', 'Select from list'), ('manual', 'Type manually')],
+        string='Database', required=True,
+        default=lambda self: 'select' if self.env.context.get('db_list') else 'manual')
+    db_pick = fields.Selection(selection='_sel_databases', string='Database',
+                               store=False)
+    # Canonical value used by the backup; in 'select' mode it is filled from the
+    # picker, in 'manual' mode it is typed. One database per backup.
+    db_name = fields.Char(
+        string='Database name',
+        help="Technical name of the database to back up.")
     backup_format = fields.Selection(
         [('zip', 'Zip (database + filestore)'),
          ('dump', 'Dump (SQL only, no filestore)')],
@@ -30,10 +42,40 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         # the action context).
         return [(d, d) for d in (self.env.context.get('db_list') or [])]
 
+    @api.onchange('db_source')
+    def _onchange_db_source(self):
+        # Switching method clears the other input so the two are never mixed.
+        self.db_name = False
+        self.db_pick = False
+
+    @api.onchange('db_pick')
+    def _onchange_db_pick(self):
+        # In 'select' mode the picked value IS the database (kept in db_name, the
+        # canonical field, since db_pick is not stored).
+        if self.db_pick:
+            self.db_name = self.db_pick
+
+    @api.onchange('db_name')
+    def _onchange_db_name_single(self):
+        # Immediate feedback: a backup targets exactly one database, so warn as soon
+        # as more than one is typed (the hard block is in _check_db_name on submit).
+        if self.db_name and len(self.db_name.replace(',', ' ').split()) > 1:
+            return {'warning': {
+                'title': _("One database only"),
+                'message': _("You can back up only one database at a time. "
+                             "Please enter a single database name."),
+            }}
+
     @api.constrains('db_name')
     def _check_db_name(self):
         for rec in self:
-            if rec.db_name and not SAFE_NAME_RE.match(rec.db_name.strip()):
+            db = (rec.db_name or '').strip()
+            # Exactly one database per backup.
+            if db and len(db.replace(',', ' ').split()) > 1:
+                raise ValidationError(_(
+                    "Only one database can be backed up at a time — enter a single "
+                    "database name."))
+            if db and not SAFE_NAME_RE.match(db):
                 raise ValidationError(_(
                     "Invalid database name '%s'. Only letters, digits, '.', '_' "
                     "and '-' are allowed."
@@ -65,66 +107,70 @@ class ServerBackupDatabaseWizard(models.TransientModel):
 
     def action_backup(self):
         self.stage_id._check_action_access()
-        self._check_db_name()
         self.ensure_one()
+        if not (self.db_name or '').strip():
+            raise UserError(_("Choose a database from the list or type one."))
+        self._check_db_name()
         stage = self.stage_id.sudo()
         host = stage.host_id
-        project = host.backup_project_id
-        if not project:
+        Storage = self.env['server.backup.storage']
+        if not Storage._keys_set():
             raise UserError(_(
-                "This server has no Backup Project assigned. Assign one in "
-                "Server Management → Servers → Backups — it provides the bucket "
-                "and credentials."))
+                "Backup storage is not configured. Set the bucket and keys in "
+                "Server Management → General Settings → Backups."))
 
         # Manual backups live under a separate 'manual/' area with a FIXED key per
-        # (server, db): each press OVERWRITES the previous one, so there's only
-        # ever a single latest manual backup per database. The whole 'manual/'
-        # area is wiped daily at 03:00 (see _cron_purge_manual). The daily
-        # retention prune only touches '<server>/', so it never affects these.
-        server_slug = self.env['server.host']._slug(host.name)
-        seg = (host.ip or '').replace('.', '-')
+        # (category, server, db): each press OVERWRITES the previous one, so there
+        # is only ever a single latest manual backup per database. The whole
+        # 'manual/' area is wiped daily at 03:00 (see _cron_purge_manual). The
+        # daily retention prune only touches '<category>/...', so it never affects
+        # these.
+        category = host.backup_category or 'odex'
+        # Same instance segment as the daily backup: the stage's name already holds
+        # the nginx domain (or ip:port) resolved at discovery; fall back to host IP.
+        seg = host._backup_host_seg(stage.name) or host._backup_host_seg(host.ip)
         ext = 'dump' if self.backup_format == 'dump' else 'zip'
-        key = project._object_key(
-            ['manual', server_slug, seg, '%s.%s' % (self.db_name, ext)])
-        try:
-            put_url = project._presign_put(key, ttl=3 * 3600)
-        except UserError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise UserError(_("Could not reach object storage for project '%s': %s")
-                            % (project.name, exc))
-
-        # Dump on the server and upload straight to the bucket via the pre-signed
-        # URL — no object-storage credentials touch the managed server.
-        inventory = stage._build_inventory()
+        key = Storage._object_key(
+            ['manual', category, seg, '%s.%s' % (self.db_name, ext)])
+        # Capture plain values now (the wizard is transient and may be vacuumed
+        # before the background job runs).
+        db_name = self.db_name
+        backup_format = self.backup_format or 'zip'
+        filename = '%s.%s' % (db_name, ext)
+        url = self._detect_protocol(stage.name)
+        admin_password = stage.admin_password
         playbook = os.path.join(os.path.dirname(__file__),
                                 '../ansible/playbooks/backup_database.yml')
-        result = stage._run_ansible_playbook(playbook, inventory, {
-            'admin_password': stage.admin_password,
-            'url': self._detect_protocol(stage.name),
-            'database_name': self.db_name,
-            'backup_format': self.backup_format or 'zip',
-            'presigned_url': put_url,
-        }, timeout=3 * 3600)
-        if not result['success']:
-            raise UserError(_('❌ Failed to backup: %s') % result['output'])
 
-        filename = '%s.%s' % (self.db_name, ext)
-        try:
-            download_url = project._presign_get(key, filename=filename)
-        except Exception:  # noqa: BLE001
-            download_url = ''
-        # target 'self' + the attachment disposition makes the browser DOWNLOAD
-        # the file automatically — no popup to block, and Odoo stays open.
-        if download_url:
-            return {'type': 'ir.actions.act_url', 'url': download_url, 'target': 'self'}
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': _('Database Backup'),
-                'message': _('✅ Backup uploaded to %s.') % project.bucket,
-                'type': 'success',
-                'sticky': False,
-            },
-        }
+        def work(stg):
+            St = stg.env['server.backup.storage']
+            try:
+                put_url = St._presign_put(key, ttl=3 * 3600)
+            except Exception as exc:  # noqa: BLE001
+                return {'ok': False, 'message': _("Could not reach object storage: %s") % exc}
+            # Dump on the server and upload straight to the bucket via the pre-signed
+            # URL — no object-storage credentials touch the managed server.
+            result = stg._run_ansible_playbook(playbook, stg._build_inventory(), {
+                'admin_password': admin_password,
+                'url': url,
+                'database_name': db_name,
+                'backup_format': backup_format,
+                'presigned_url': put_url,
+            }, timeout=3 * 3600)
+            if not result['success']:
+                return {'ok': False,
+                        'message': _('❌ Backup of %s failed — see Last Operation '
+                                     'Details.') % db_name,
+                        'detail': result['output']}
+            try:
+                download_url = St._presign_get(key, filename=filename)
+            except Exception:  # noqa: BLE001
+                download_url = ''
+            # Manual backups live under the 'manual/' area and are removed by the
+            # daily purge cron (_cron_purge_manual, 03:00) — not after download.
+            # The presigned GET sets Content-Disposition attachment, so the frontend
+            # service triggers the download automatically when this arrives.
+            return {'ok': True, 'url': download_url,
+                    'message': _('✅ Backup of %s ready — downloading…') % db_name}
+
+        return stage._run_bg(_('Backup database %s') % db_name, work)

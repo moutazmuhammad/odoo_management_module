@@ -4,54 +4,57 @@
         <field name="name">server.stage.form</field>
         <field name="model">server.stage</field>
         <field name="arch" type="xml">
-            <form string="Stage">
+            <form string="Stage" js_class="server_mgmt_form">
                 <header>
                     <!-- Unrestricted copies so button attrs can read them for all groups.
                          can_act = False means: Client Server + current user is not Operator+. -->
                     <field name="client_stage" invisible="1"/>
                     <field name="can_act" invisible="1"/>
-                    <button name="action_check_status" type="object"
-                            string="Check Status" icon="fa-refresh" class="btn-secondary"
-                            groups="odoo_server_management.group_user"/>
-                    <field name="odoo_status" nolabel="1" readonly="1" force_save="1" style="font-weight: bold;"/>
+                    <field name="odoo_status_live" nolabel="1" readonly="1" style="font-weight: bold;"/>
+                    <button name="action_check_status_now" type="object" string="Check Status"
+                            class="btn-secondary" icon="fa-refresh"
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
-                    <button name="action_backup_database" type="object" string="Backup URL"
+                    <button name="action_backup_database" type="object" string="Backup"
                             class="btn-primary" icon="fa-database"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_upgrade_module" string="Upgrade Module" type="object"
                             class="btn-primary" icon="fa-refresh"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_view_logs_stream" type="object" string="View Logs"
                             class="btn-primary" icon="fa-terminal"
-                            groups="odoo_server_management.group_user"/>
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
                     <button name="action_view_conf_file" type="object" string="View Conf File"
                             class="btn btn-primary" icon="fa-file-text"
-                            groups="odoo_server_management.group_user"/>
+                            groups="odoo_server_management.group_user"
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
                     <button name="action_pull_code" type="object" string="Pull Code"
                             class="btn btn-primary" icon="fa-download"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_start_service" type="object" string="Start"
                             class="btn btn-success" icon="fa-play"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_stop_service" type="object" string="Stop"
                             class="btn btn-danger" icon="fa-stop"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_restart_service" type="object" string="Restart"
                             class="btn btn-warning" icon="fa-refresh"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': [('can_act', '=', False)]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
                 </header>
 
                 <sheet>
@@ -61,29 +64,40 @@
                     </div>
                     <group>
                         <field name="client_stage" widget="boolean_toggle"
-                               groups="odoo_server_management.group_admin"/>
+                               groups="odoo_server_management.group_devops"/>
                         <field name="notes"/>
                     </group>
+                    <group string="Last Operation" attrs="{'invisible': [('op_state', '=', False)]}">
+                        <group>
+                            <field name="op_label" readonly="1"/>
+                            <field name="op_state" readonly="1"/>
+                            <field name="op_time" readonly="1"/>
+                        </group>
+                        <field name="op_detail" readonly="1" nolabel="1" colspan="2"
+                               attrs="{'invisible': [('op_detail', '=', False)]}"
+                               placeholder="Operation log / output…"/>
+                    </group>
                     <notebook>
-                        <page string="General Info">
+                        <page string="General Info" groups="odoo_server_management.group_devops">
                             <group>
                                 <group>
-                                    <field name="host_id" groups="odoo_server_management.group_operator"/>
-                                    <field name="service_name" groups="odoo_server_management.group_operator"/>
+                                    <field name="host_id"/>
+                                    <field name="service_name"/>
                                     <field name="odoo_version"/>
                                     <field name="needs_review" readonly="1"/>
                                 </group>
-                                <group groups="odoo_server_management.group_admin">
+                                <group>
                                     <field name="log_file_path"/>
                                     <field name="upgrade_module_path"/>
                                     <field name="conf_file"/>
+                                    <field name="nginx_file"/>
                                     <field name="odoo_bin"/>
                                     <field name="python_bin"/>
                                 </group>
                             </group>
                         </page>
 
-                        <page string="Access Info" groups="odoo_server_management.group_admin">
+                        <page string="Access Info" groups="odoo_server_management.group_devops">
                             <group>
                                 <group string="Odoo Service Secret">
                                     <field name="admin_password" password="True"/>
@@ -94,15 +108,54 @@
                             </group>
                         </page>
 
-                        <page string="Branch Configuration" groups="odoo_server_management.group_admin">
-                            <group>
-                                <field name="repo_branch_paths">
-                                    <tree editable="bottom">
-                                        <field name="repository_id"/>
-                                        <field name="branch_id"/>
-                                    </tree>
-                                </field>
-                            </group>
+                        <page string="Branch Configuration">
+                            <button name="action_refresh_commits" type="object"
+                                    string="Get Commit" class="btn-secondary"
+                                    icon="fa-refresh"
+                                    groups="odoo_server_management.group_user"/>
+                            <field name="repo_branch_paths">
+                                <tree default_order="repository_id">
+                                    <field name="repository_id"/>
+                                    <field name="branch_id"/>
+                                    <field name="current_commit_short" string="Commit"/>
+                                    <field name="commit_subject" string="Message"/>
+                                    <field name="commit_date" string="Commit Date" optional="show"/>
+                                    <field name="commit_author" string="Author" optional="hide"/>
+                                    <field name="current_commit" string="Full SHA" optional="hide"/>
+                                    <field name="commit_checked" string="Checked" optional="show"/>
+                                </tree>
+                            </field>
+                            <div class="text-muted" style="font-size:12px;">
+                                The commit each repository checkout is currently on,
+                                per branch. Filled during <b>Discover</b>, refreshed
+                                daily, and on demand via <b>Get Commit</b>.
+                            </div>
+                        </page>
+                        <page string="Backups">
+                            <button name="action_refresh_backups" type="object"
+                                    string="Refresh List" class="btn-secondary"
+                                    icon="fa-refresh"
+                                    groups="odoo_server_management.group_user"/>
+                            <field name="backup_file_ids" readonly="1" nolabel="1">
+                                <tree string="Stored Backups" create="false" edit="false"
+                                      delete="false" editable="false"
+                                      default_order="db asc, last_modified desc">
+                                    <field name="is_client" invisible="1"/>
+                                    <field name="db" string="Database"/>
+                                    <field name="last_modified" string="Created"/>
+                                    <field name="size_human" string="Size"/>
+                                    <field name="filename" string="File" optional="hide"/>
+                                    <button name="action_download" type="object"
+                                            string="Download" icon="fa-download" class="btn-link"/>
+                                </tree>
+                            </field>
+                            <div class="text-muted" style="font-size:12px;">
+                                Daily backups for this stage, grouped by database and newest
+                                first (several days are kept per database). Manual backups are
+                                not shown here. Click <b>Refresh List</b> to fetch the latest.
+                                Download gives a temporary link. For <b>Client Server</b> stages,
+                                only Operators and Admins may download.
+                            </div>
                         </page>
                     </notebook>
                 </sheet>
@@ -121,7 +174,10 @@
                 <field name="odoo_status"/>
                 <field name="needs_review" readonly="1"/>
                 <field name="client_stage" widget="boolean_toggle" readonly="1"
-                       groups="odoo_server_management.group_admin"/>
+                       groups="odoo_server_management.group_devops"/>
+                <button name="action_check_status" type="object"
+                        string="Check Status" icon="fa-refresh"
+                        groups="odoo_server_management.group_user"/>
             </tree>
         </field>
     </record>
@@ -154,7 +210,7 @@
         <field name="name">Stages</field>
         <field name="res_model">server.stage</field>
         <field name="view_mode">tree,form</field>
-        <field name="context">{}</field>
+        <field name="context">{'search_default_group_by_host': 1}</field>
     </record>
 
     <menuitem id="menu_stages" name="Stages" parent="menu_server_management"

@@ -18,7 +18,7 @@ class GithubSettings(models.TransientModel):
     # the Odoo host). The matching public key must already be in each server's
     # authorized_keys (pre-provisioned). No password is ever used.
     ssh_default_user = fields.Char(string="Default SSH User", default="root")
-    ssh_default_port = fields.Integer(string="Default SSH Port", default=22)
+    ssh_default_port = fields.Integer(string="Default SSH Port", default=7812)
     # Preferred: upload the key file instead of pasting it as text.
     ssh_private_key_upload = fields.Binary(
         string="Upload SSH Private Key",
@@ -42,17 +42,45 @@ class GithubSettings(models.TransientModel):
              "Odoo host. If set, it takes precedence over the pasted key.",
     )
 
-    # Object-storage targets (bucket, credentials, prefix, retention, signed-URL
-    # TTL) live on each Backup Project now — both the daily job and the real-time
-    # button use the server's assigned project. Only the daily run-hour is global.
-    # Hour (server time, 0-23) at which the per-project DAILY backups run. The
-    # job ticks hourly and only acts during this hour, so backups stay at night.
+    # Hour (server time, 0-23) at which the DAILY backups run. The job ticks
+    # hourly and only acts during this hour, so backups stay at night.
     backup_hour = fields.Integer(
         string="Daily Backup Hour (server time, 0–23)", default=2,
-        help="Per-project daily backups run once at this hour (server/UTC time). "
-             "Pick a night hour for your servers' timezone, e.g. for UTC+3 a "
-             "value of 1 = 4 AM local.",
+        help="Daily backups run once at this hour (server/UTC time). Pick a "
+             "night hour for your servers' timezone, e.g. for UTC+3 a value of "
+             "1 = 4 AM local.",
     )
+
+    # Single, global object-storage Space shared by every server. The erp/odex
+    # category on each server becomes the top-level folder inside this bucket.
+    backup_daily_enabled = fields.Boolean(string="Daily Backups Enabled", default=True)
+    backup_agent_auto_deploy = fields.Boolean(
+        string="Auto-install Backup Agent on Every Server", default=True,
+        help="When on, every reachable server automatically gets the self-backup "
+             "agent + a daily cron (installed within the hour of being added), so "
+             "each server backs itself up. Turn off to manage agents manually.")
+    backup_bucket = fields.Char(string="Bucket / Space")
+    backup_region = fields.Char(string="Region", default="fra1",
+                                help="e.g. nyc3 / fra1 / sgp1.")
+    backup_endpoint = fields.Char(
+        string="Custom Endpoint",
+        help="Optional. Override the endpoint URL (non-DigitalOcean S3). Leave "
+             "empty to derive it from the region.")
+    backup_prefix = fields.Char(string="Key Prefix",
+                                help="Optional folder prefixed to every object key.")
+    backup_retention_days = fields.Integer(string="Retention (days)", default=7)
+    backup_signed_url_ttl = fields.Integer(string="Download Link TTL (seconds)", default=3600)
+    backup_agent_manager_url = fields.Char(
+        string="Agent Manager URL",
+        help="URL the per-server backup agents use to reach THIS manager. Leave "
+             "empty to use web.base.url. Set an IP-based URL (e.g. "
+             "http://203.0.113.10) when the manager's domain isn't resolvable "
+             "from the managed servers; the agent still sends the domain as a "
+             "Host header so routing works.")
+    # Write-only credentials (never echoed back; blank = keep the stored value).
+    backup_access_key = fields.Char(string="Backup Access Key")
+    backup_secret_key = fields.Char(string="Backup Secret Key")
+    backup_keys_set = fields.Boolean(string="Backup Credentials Configured", readonly=True)
 
     # Self-signup: when enabled, anyone with an allowed-domain email can sign up
     # and gets the module's "User" role only.
@@ -79,12 +107,28 @@ class GithubSettings(models.TransientModel):
             github_token='',
             github_token_is_set=bool(Stage._get_secret_param('server.github.token')),
             ssh_default_user=IrConfig.get_param('server.ssh.user', default='root'),
-            ssh_default_port=int(IrConfig.get_param('server.ssh.port', default='22') or 22),
+            ssh_default_port=int(IrConfig.get_param('server.ssh.port', default='7812') or 7812),
             ssh_private_key='',
             ssh_key_is_set=bool(Stage._get_secret_param('server.ssh.private_key')
                                 or IrConfig.get_param('server.ssh.private_key_file')),
             ssh_private_key_file=IrConfig.get_param('server.ssh.private_key_file', default=''),
             backup_hour=int(IrConfig.get_param('server.backup.hour', default='2') or 2),
+            backup_daily_enabled=(IrConfig.get_param('server.backup.daily_enabled', default='1')
+                                  not in ('0', 'False', 'false', '')),
+            backup_agent_auto_deploy=(IrConfig.get_param('server.backup.agent_auto_deploy', default='1')
+                                      not in ('0', 'False', 'false', '')),
+            backup_bucket=IrConfig.get_param('server.backup.bucket', default=''),
+            backup_region=IrConfig.get_param('server.backup.region', default='fra1'),
+            backup_endpoint=IrConfig.get_param('server.backup.endpoint', default=''),
+            backup_prefix=IrConfig.get_param('server.backup.prefix', default=''),
+            backup_retention_days=int(IrConfig.get_param('server.backup.retention_days', default='7') or 7),
+            backup_signed_url_ttl=int(IrConfig.get_param('server.backup.signed_url_ttl', default='3600') or 3600),
+            backup_agent_manager_url=IrConfig.get_param('server.backup.agent_manager_url', default=''),
+            # Secrets are write-only — never echo them back.
+            backup_access_key='',
+            backup_secret_key='',
+            backup_keys_set=bool(Stage._get_secret_param('server.backup.access_key')
+                                 and Stage._get_secret_param('server.backup.secret_key')),
             auto_stop_days=int(IrConfig.get_param('server.autostop.days', default='7') or 7),
             signup_enabled=(IrConfig.get_param('auth_signup.invitation_scope', default='b2b') == 'b2c'),
             signup_allowed_domains=IrConfig.get_param('server.signup.allowed_domains', default='exp-sa.com, odex.sa'),
@@ -116,10 +160,24 @@ class GithubSettings(models.TransientModel):
 
         IrConfig.set_param('server.github.user', self.github_user or '')
         IrConfig.set_param('server.ssh.user', self.ssh_default_user or 'root')
-        IrConfig.set_param('server.ssh.port', str(self.ssh_default_port or 22))
+        IrConfig.set_param('server.ssh.port', str(self.ssh_default_port or 7812))
         IrConfig.set_param('server.ssh.private_key_file', self.ssh_private_key_file or '')
         IrConfig.set_param('server.backup.hour',
                            str(self.backup_hour if 0 <= (self.backup_hour or 0) <= 23 else 2))
+        IrConfig.set_param('server.backup.daily_enabled', '1' if self.backup_daily_enabled else '0')
+        IrConfig.set_param('server.backup.agent_auto_deploy', '1' if self.backup_agent_auto_deploy else '0')
+        IrConfig.set_param('server.backup.bucket', (self.backup_bucket or '').strip())
+        IrConfig.set_param('server.backup.region', (self.backup_region or 'fra1').strip())
+        IrConfig.set_param('server.backup.endpoint', (self.backup_endpoint or '').strip())
+        IrConfig.set_param('server.backup.prefix', (self.backup_prefix or '').strip())
+        IrConfig.set_param('server.backup.retention_days', str(self.backup_retention_days or 7))
+        IrConfig.set_param('server.backup.signed_url_ttl', str(self.backup_signed_url_ttl or 3600))
+        IrConfig.set_param('server.backup.agent_manager_url', (self.backup_agent_manager_url or '').strip())
+        # Backup credentials: only update when a new value was entered (blank = keep).
+        if self.backup_access_key:
+            Stage._set_secret_param('server.backup.access_key', self.backup_access_key.strip())
+        if self.backup_secret_key:
+            Stage._set_secret_param('server.backup.secret_key', self.backup_secret_key.strip())
         IrConfig.set_param('server.autostop.days', str(self.auto_stop_days or 0))
         # Signup: toggle Odoo's free signup + store the allowed-domain list.
         IrConfig.set_param('auth_signup.invitation_scope', 'b2c' if self.signup_enabled else 'b2b')
@@ -132,5 +190,10 @@ class GithubSettings(models.TransientModel):
         if new_key:
             Stage._set_secret_param('server.ssh.private_key', new_key)
             Stage._materialize_key(new_key)
+
+    def action_test_backup_storage(self):
+        """Save the form, then verify the global Space is reachable."""
+        self.set_values()
+        return self.env['server.backup.storage'].action_test_storage()
 
 

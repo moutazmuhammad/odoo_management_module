@@ -11,6 +11,7 @@
     - name: Upgrade Odoo Module
       shell: >
         {{ upgrade_module_path }}
+        -c {{ conf_file | quote }}
         -d {{ database_name | quote }}
         -u {{ module_name | quote }}
         --stop-after-init

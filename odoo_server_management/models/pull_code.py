@@ -29,10 +29,27 @@ class StageRepoBranchPath(models.Model):
     pull_path = fields.Char(string='Pull Path on Server', required=True)
     display_name = fields.Char(string='Display Name', compute='_compute_display_name', store=True)
 
-    @api.depends('repository_id.name', 'branch_id.name')
+    # The commit this checkout's HEAD is currently on. Filled during discovery,
+    # refreshed daily by cron, and on demand via the "Get Commit" button.
+    current_commit = fields.Char(string='Current Commit', readonly=True,
+        help="Full SHA of the commit this checkout is currently on.")
+    current_commit_short = fields.Char(string='Commit', readonly=True,
+        help="Short SHA of the current commit.")
+    commit_subject = fields.Char(string='Commit Message', readonly=True,
+        help="Subject line of the current commit.")
+    commit_author = fields.Char(string='Commit Author', readonly=True)
+    commit_date = fields.Char(string='Commit Date', readonly=True,
+        help="Commit date of the current HEAD, as reported by git (ISO 8601).")
+    commit_checked = fields.Datetime(string='Commit Checked', readonly=True,
+        help="When this commit information was last refreshed.")
+
+    @api.depends('repository_id.name', 'branch_id.name', 'pull_path')
     def _compute_display_name(self):
         for rec in self:
             repo = rec.repository_id.name or ''
             branch = rec.branch_id.name or ''
-            rec.display_name = f"{repo} [{branch}]"
+            # Include the checkout folder so the SAME repo cloned at different paths
+            # (each on its own branch) is distinguishable in the Pull wizard.
+            leaf = (rec.pull_path or '').rstrip('/').split('/')[-1]
+            rec.display_name = f"{repo} [{branch}]" + (f" — {leaf}" if leaf else "")
 

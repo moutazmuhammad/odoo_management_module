@@ -1,12 +1,15 @@
 import os
 import re
 import json
+import time
 import shutil
 import logging
 import tempfile
 import subprocess
 import warnings
 import requests
+import psycopg2
+from psycopg2 import errorcodes
 
 from cryptography.fernet import Fernet, InvalidToken
 from urllib3.exceptions import InsecureRequestWarning
@@ -21,15 +24,58 @@ SECRET_KEY_ENV = 'ODOO_SERVER_MGMT_KEY'
 
 # Role groups used for in-method authorization (defense in depth behind sudo()).
 # Hierarchy (each implies the previous): User -> Operator -> Administrator.
-GROUP_USER = 'odoo_server_management.group_user'          # perform actions
-GROUP_OPERATOR = 'odoo_server_management.group_operator'  # + manage/discover servers
-GROUP_ADMIN = 'odoo_server_management.group_admin'        # + see all details + settings
+GROUP_USER = 'odoo_server_management.group_user'          # Developer: act on stages
+GROUP_OPERATOR = 'odoo_server_management.group_operator'  # Operational: + servers/discover/agent
+GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: everything except settings
+GROUP_ADMIN = 'odoo_server_management.group_admin'        # Administrator: + General Settings
 
 # Keys whose values must never be written to ir.logging / process output.
 SENSITIVE_VAR_KEYS = {
     'github_token', 'admin_password', 'ssh_password', 'master_pwd',
     'db_password', 'public_key', 'private_key',
 }
+
+
+def _clean_ansible_log(raw, ok):
+    """Human-friendly 'Last Operation Details': show ERRORS ONLY.
+
+    On success → '' (the toast and the ✅ state already say it worked, so we don't
+    dump the raw PLAY/TASK/RECAP). On failure → the failing step plus the real error
+    message(s) extracted from the ansible output (msg/stderr/stdout of the failed
+    task), not the whole playbook scaffolding."""
+    if ok:
+        return ''
+    text = (raw or '').strip()
+    if not text:
+        return ''
+    lines = text.splitlines()
+    task = ''
+    for ln in lines:
+        m = re.match(r'\s*TASK \[(.+?)\]', ln)
+        if m:
+            task = m.group(1)
+    chunks = []
+    for ln in lines:
+        if re.search(r'fatal:|FAILED!|UNREACHABLE!|^ERROR', ln):
+            jm = re.search(r'=>\s*(\{.*\})\s*$', ln)
+            if jm:
+                try:
+                    d = json.loads(jm.group(1))
+                    for k in ('msg', 'module_stderr', 'stderr', 'stdout', 'module_stdout'):
+                        v = d.get(k)
+                        if v and str(v).strip():
+                            chunks.append(str(v).strip())
+                    if chunks:
+                        continue
+                except Exception:  # noqa: BLE001 — fall back to the raw line
+                    pass
+            chunks.append(ln.strip())
+    # De-duplicate while preserving order; fall back to the raw text if we could not
+    # recognise any error markers (so we never hide a real failure).
+    detail = '\n'.join(dict.fromkeys(c for c in chunks if c)) or text
+    if task:
+        detail = 'Failed at: %s\n\n%s' % (task, detail)
+    return detail[-4000:]  # bounded but big enough to show a traceback
 
 
 class Stage(models.Model):
@@ -77,25 +123,28 @@ class Stage(models.Model):
     # services across several versions, so every path/version lives here.
     service_name = fields.Char(string='Service Name', required=True)
     odoo_version = fields.Char(string='Odoo Version', readonly=True)
-    odoo_bin = fields.Char(string='odoo-bin Path', readonly=True, groups=GROUP_ADMIN)
-    python_bin = fields.Char(string='Python Path', readonly=True, groups=GROUP_ADMIN)
+    odoo_bin = fields.Char(string='odoo-bin Path', readonly=True, groups=GROUP_DEVOPS)
+    python_bin = fields.Char(string='Python Path', readonly=True, groups=GROUP_DEVOPS)
     # Auto-detected — optional so partially-discovered instances can still be
     # saved and flagged via needs_review; actions validate before use.
-    log_file_path = fields.Char(string='Log File Path', groups=GROUP_ADMIN)
-    conf_file = fields.Char(string='Conf File', groups=GROUP_ADMIN)
-    upgrade_module_path = fields.Char(string='Upgrade Module Path', groups=GROUP_ADMIN)
+    log_file_path = fields.Char(string='Log File Path', groups=GROUP_DEVOPS)
+    conf_file = fields.Char(string='Conf File', groups=GROUP_DEVOPS)
+    # The nginx site-config file that fronts this instance (matched to its conf by
+    # port during discovery); blank when the instance has no nginx vhost.
+    nginx_file = fields.Char(string='Nginx File', readonly=True, groups=GROUP_DEVOPS)
+    upgrade_module_path = fields.Char(string='Upgrade Module Path', groups=GROUP_DEVOPS)
     http_port = fields.Integer(string='HTTP Port', readonly=True)
     needs_review = fields.Boolean(
         string='Needs Review', default=False,
         help="Set when auto-discovery could not determine every value.",
     )
 
-    odoo_user = fields.Char(string='Odoo User', groups=GROUP_ADMIN)
+    odoo_user = fields.Char(string='Odoo User', groups=GROUP_DEVOPS)
     # Stored encrypted at rest; never exposed directly in views. The plaintext
     # is only available through the computed `admin_password` (DevOps only).
-    admin_password_enc = fields.Char(string='Odoo Admin Password (encrypted)', groups=GROUP_ADMIN)
+    admin_password_enc = fields.Char(string='Odoo Admin Password (encrypted)', groups=GROUP_DEVOPS)
     admin_password = fields.Char(
-        string='Odoo Admin Password', groups=GROUP_ADMIN,
+        string='Odoo Admin Password', groups=GROUP_DEVOPS,
         compute='_compute_admin_password', inverse='_inverse_admin_password',
         store=False,
     )
@@ -115,7 +164,7 @@ class Stage(models.Model):
     # Admin-only: whether the daily auto-stop job may stop this instance (only
     # has effect when its host's "Stop Instances" is enabled).
     auto_stop = fields.Boolean(
-        string='Auto-Stop', default=True, groups=GROUP_ADMIN,
+        string='Auto-Stop', default=True, groups=GROUP_DEVOPS,
         help="If the server's 'Stop Instances' is on, stop this instance once "
              "its service has been running longer than the configured days.",
     )
@@ -126,7 +175,22 @@ class Stage(models.Model):
         [("running", "🟢 Running"), ("stopped", "🔴 Stopped"), ("unknown", "⚪ Not checked")],
         string="Odoo Status", default='unknown', readonly=True, copy=False,
     )
+    # Status shown on the form. Mirrors the stored odoo_status (kept current by the
+    # 5-min cron and the "Check Status" button) — it does NOT probe over SSH on open,
+    # so the form loads instantly. Press "Check Status" for a live refresh.
+    odoo_status_live = fields.Selection(
+        [("running", "🟢 Running"), ("stopped", "🔴 Stopped"), ("unknown", "⚪ Not checked")],
+        string="Status", readonly=True, compute='_compute_status_live')
     last_status_check = fields.Datetime(string="Last Status Check", readonly=True)
+    # Durable record of the last background action (start/stop/restart/pull/upgrade/
+    # backup) so its result/errors survive a reload. The live toast is pushed over
+    # the bus (see _run_bg); these fields are the persisted copy shown on the form.
+    op_label = fields.Char(string="Last Operation", readonly=True, copy=False)
+    op_state = fields.Selection(
+        [('running', '⏳ Running'), ('done', '✅ Success'), ('failed', '❌ Failed')],
+        string="Last Operation Result", readonly=True, copy=False)
+    op_time = fields.Datetime(string="Last Operation At", readonly=True, copy=False)
+    op_detail = fields.Text(string="Last Operation Details", readonly=True, copy=False)
     # Cached DB list (newline-separated), refreshed by a background cron every
     # 15 min so the backup/upgrade wizards open instantly without an SSH call.
     available_databases = fields.Text(string="Available Databases", readonly=True, copy=False)
@@ -134,6 +198,65 @@ class Stage(models.Model):
     # Cached list of the instance's custom modules (newline-separated), detected
     # during discovery — powers the Upgrade wizard's module dropdown.
     available_modules = fields.Text(string="Available Modules", readonly=True, copy=False)
+    # Same, for Odoo's bundled (core) modules — offered alongside the custom ones
+    # in the Upgrade wizard so e.g. `account`/`web` can be upgraded too.
+    available_odoo_modules = fields.Text(string="Available Odoo Modules", readonly=True, copy=False)
+
+    # Stored backups for this stage — REAL transient rows (a regular One2many, so
+    # the form renders them reliably). They are (re)listed from the object Space on
+    # demand by _load_backups(), triggered by the Backups page "Refresh List" button
+    # (action_refresh_backups) — never on open, so the form stays fast.
+    backup_file_ids = fields.One2many(
+        'server.backup.file', 'stage_id', string='Stored Backups')
+
+    def _load_backups(self):
+        """(Re)list this stage's backups from the object Space into real rows."""
+        if not self.id:
+            return
+        try:
+            if self.env['server.backup.storage']._keys_set():
+                self.env['server.backup.file']._populate_for_stage(self)
+        except Exception:  # noqa: BLE001 — never break the form on a storage hiccup
+            _logger.exception("Listing backups failed for stage %s", self.id)
+
+    def action_refresh_backups(self):
+        """Backups page button: re-list this stage's backups live from the object
+        Space so the (read-only) list shows the latest from the bucket on demand.
+        Returns a falsy value so the web client just reloads THIS record's data
+        (surfacing the new rows) — returning a truthy non-action made it re-run the
+        action and jump to another record in a list/pager."""
+        self.ensure_one()
+        self._check_access(GROUP_USER)
+        # sudo: a plain Server-Management user may refresh the list; reading the
+        # host/category to list the bucket must not be blocked (and _load_backups
+        # swallows errors, so without this the list just silently stays empty).
+        self.sudo()._load_backups()
+        return False
+
+    def action_refresh_commits(self):
+        """Branch Configuration page button ("Get Commit"): refresh the current
+        git commit of THIS instance's repo checkouts now, over SSH. Returns a
+        falsy value so the web client just reloads this record's data (showing the
+        updated commits) without jumping to another record."""
+        self.ensure_one()
+        self._check_access(GROUP_USER)
+        if self.host_id:
+            self.host_id.sudo()._refresh_commits(self)
+        return False
+
+    def action_open_form(self):
+        """Open this stage's full form from the host's inline instance list. Kept
+        light (no SSH/S3 on open) so it is instant — status refreshes via the 5-min
+        cron / 'Check Status' button, and backups via the Backups 'Refresh List'."""
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'name': self.name or _('Stage'),
+            'res_model': 'server.stage',
+            'res_id': self.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
 
     _sql_constraints = [
         ('unique_stage_name', 'unique(name)', 'Stage name must be unique!'),
@@ -149,9 +272,9 @@ class Stage(models.Model):
     @api.model
     def _default_ssh_port(self):
         try:
-            return int(self.env['ir.config_parameter'].sudo().get_param('server.ssh.port') or 22)
+            return int(self.env['ir.config_parameter'].sudo().get_param('server.ssh.port') or 7812)
         except (TypeError, ValueError):
-            return 22
+            return 7812
 
     @api.model
     def _ssh_key_file(self):
@@ -332,76 +455,267 @@ class Stage(models.Model):
     # Probe timeout per attempt (short — this is just a liveness check).
     _STATUS_TIMEOUT = 3
 
-    @api.model
-    def _probe_status(self, name):
-        """Liveness probe for one instance by its `name` (domain or ip:port).
-
-        Pure network call — touches no ORM, so it is safe to run from worker
-        threads (see action_check_status). Returns 'running' or 'stopped'."""
-        if not name:
-            return 'stopped'
-        base_url = re.sub(r'^(https?://)?', '', name.strip().lower()).rstrip('/')
-        port = None
-        if ':' in base_url:
-            try:
-                base_url, port_str = base_url.rsplit(':', 1)
-                port = int(port_str)
-                if not (1 <= port <= 65535):
-                    return 'stopped'
-            except ValueError:
-                return 'stopped'
-
-        headers = {"User-Agent": "Odoo-Server-Management"}
-        suffix = f":{port}" if port else ""
-        # Try https then http, one quick attempt each (verify=False avoids a slow
-        # extra SSL-retry round). Total worst case ~2 × _STATUS_TIMEOUT.
-        urls = [f"https://{base_url}{suffix}/web/login",
-                f"http://{base_url}{suffix}/web/login"]
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", InsecureRequestWarning)
-            for url in urls:
-                try:
-                    resp = requests.get(url, headers=headers,
-                                        timeout=self._STATUS_TIMEOUT, verify=False)
-                    if resp.status_code == 200:
-                        return 'running'
-                except Exception:
-                    continue
-        return 'stopped'
+    def _compute_status_live(self):
+        """Mirror the stored odoo_status onto the form field — NO SSH probe, so the
+        form opens instantly. The stored status is kept current by the 5-min cron
+        (_cron_refresh_status) and refreshed on demand by action_check_status."""
+        for stage in self:
+            stage.odoo_status_live = stage.odoo_status or 'unknown'
 
     def action_check_status(self):
-        """Refresh odoo_status for the selected stage(s). Probes run in parallel
-        so checking many instances (or many users acting at once) stays fast and
-        never blocks on render."""
+        """Per-stage button: refresh the REAL systemd status over SSH on demand.
+
+        The SSH probe runs in a BACKGROUND thread (its own cursor), so the click
+        returns immediately and the UI never blocks/loads. The stored status is
+        updated within a moment — reload to see it (the 5-min cron also refreshes
+        it). Works for one row or a multi-selection."""
         self._check_access(GROUP_USER)
-        self = self.sudo()
-        names = {rec.id: rec.name for rec in self}
-        results = {}
-        if names:
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=min(12, len(names))) as pool:
-                futures = {pool.submit(self._probe_status, nm): rid
-                           for rid, nm in names.items()}
-                for fut in futures:
-                    rid = futures[fut]
+        stage_ids = [s.id for s in self if s.host_id and s.service_name]
+        if not stage_ids:
+            return True
+        dbname, uid = self.env.cr.dbname, self.env.uid
+
+        def _worker():
+            import odoo
+            try:
+                with odoo.registry(dbname).cursor() as cr:
+                    env = api.Environment(cr, uid, {})
+                    stages = env['server.stage'].browse(stage_ids).exists()
+                    for host in stages.mapped('host_id'):
+                        hstages = stages.filtered(lambda s: s.host_id == host)
+                        # Retry on a Postgres serialization conflict — this probe
+                        # writes server_stage rows that the refresh crons (and now
+                        # the open-form auto-refresh) also touch, so overlapping
+                        # writes can lose the commit; retry with a fresh snapshot.
+                        for attempt in range(5):
+                            try:
+                                host._refresh_status(hstages)
+                                cr.commit()
+                                break
+                            except psycopg2.OperationalError as e:
+                                cr.rollback()
+                                env.clear()
+                                if (getattr(e, 'pgcode', None) in (
+                                        errorcodes.SERIALIZATION_FAILURE,
+                                        errorcodes.DEADLOCK_DETECTED) and attempt < 4):
+                                    time.sleep(0.3 * (attempt + 1))
+                                    continue
+                                _logger.exception(
+                                    "Background status check failed for host %s", host.id)
+                                break
+                            except Exception:  # noqa: BLE001
+                                cr.rollback()
+                                env.clear()
+                                _logger.exception(
+                                    "Background status check failed for host %s", host.id)
+                                break
+            except Exception:  # noqa: BLE001 — a thread must never crash the worker
+                _logger.exception("Background status check thread failed")
+
+        import threading
+        threading.Thread(target=_worker, name='odoo-stage-status',
+                         daemon=True).start()
+        # Plain toast WITHOUT soft_reload: a soft_reload re-runs the current action
+        # and, from a list/pager, jumps to another record — so just notify and let
+        # the status land via the 30s auto-refresh (or a manual reload).
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'type': 'info', 'title': _('Status'),
+                'message': _('🔄 Refreshing status in the background — '
+                             'updates in a moment.'),
+                'sticky': False,
+            },
+        }
+
+    def _status_check_work(self):
+        """`work` for _run_bg: probe the REAL systemd status over SSH and return it
+        so the worker persists odoo_status / service_status."""
+        def work(stage):
+            statuses = stage.host_id._service_statuses(stage)
+            v = statuses.get(stage.service_name)
+            status = ('running' if v in ('active', 'activating')
+                      else ('stopped' if v else False))
+            return {'ok': True, 'message': _('🔄 Status refreshed.'),
+                    'odoo_status': status or stage.odoo_status,
+                    'service_status': status == 'running'}
+        return work
+
+    def action_check_status_now(self):
+        """Per-stage "Check Status" button: refresh the REAL systemd status over SSH.
+        Routed through _run_bg so it is guarded against repeat presses (the button
+        is hidden while op_state == 'running' and a second call is rejected), and
+        the result lands via the bus so the page updates in place automatically."""
+        self.ensure_one()
+        self._check_access(GROUP_USER)
+        if not (self.host_id and self.service_name):
+            return True
+        return self.sudo()._run_bg(_('Check status'),
+                                   self._status_check_work(), reload=True)
+
+    # ===========================
+    # Background action runner (non-blocking actions with async result toasts)
+    # ===========================
+    def _op_started_toast(self, label, reload=False):
+        """Immediate toast returned by every background action so the button spinner
+        clears at once. The `next` action that runs after the toast hides the trigger
+        so the user can't re-click and fire the job twice:
+
+        - reload=False (wizard buttons): act_window_close — shuts the wizard modal;
+          closing it reloads the parent form, which then reads op_state == 'running'
+          and hides the button (a harmless no-op for non-dialog buttons).
+        - reload=True (direct form buttons, e.g. discover/run-backup-now):
+          server_mgmt_soft_reload — reloads the current record's DATA in place
+          (staying on the SAME record, unlike the core soft_reload which restores
+          the controller and can jump to a blank/new record) so the just-started
+          op_state == 'running' hides the button immediately.
+
+        The real result arrives later as a bus toast that reloads in place again, so
+        the button reappears when the op finishes (see _run_bg / stage_ops.js)."""
+        nxt = ({'type': 'ir.actions.client', 'tag': 'server_mgmt_soft_reload'} if reload
+               else {'type': 'ir.actions.act_window_close'})
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'type': 'info',
+                'title': _('Working…'),
+                'message': _('⏳ %s started — you will be notified when it finishes.')
+                           % label,
+                'sticky': False,
+                'next': nxt,
+            },
+        }
+
+    def _busy_toast(self):
+        """Returned when an action is pressed while one is still running: warn and
+        re-sync the view in place (so the buttons, hidden while op_state=='running',
+        stay hidden) — no second operation is launched."""
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'type': 'warning',
+                'title': _('Please wait'),
+                'message': _('⏳ An operation is already running on this instance — '
+                             'wait for it to finish.'),
+                'sticky': False,
+                'next': {'type': 'ir.actions.client', 'tag': 'server_mgmt_soft_reload'},
+            },
+        }
+
+    @api.model
+    def _send_op_bus(self, uid, ok, title, message, sticky=False, url=False, reload=False):
+        """Push one operation-result notification to the user's bus channel. The
+        frontend service (stage_ops.js) shows it as a toast, triggers the automatic
+        download when `url` is set, and refreshes the current view when `reload` is
+        set (so a start/stop/restart updates the status badge without a full reload)."""
+        self.env['bus.bus']._sendone(
+            'server_mgmt_ops_%d' % uid, 'server_mgmt_op',
+            {'ok': bool(ok), 'title': title or '', 'message': message or '',
+             'sticky': bool(sticky), 'url': url or False, 'reload': bool(reload)})
+
+    def _run_bg(self, label, work, reload=False):
+        """Run `work(stage)` in a BACKGROUND thread (own cursor) so the click returns
+        instantly and the page never blocks. `work` returns a dict
+        {'ok': bool, 'message': str, 'url': str?}; any exception is caught and
+        reported as a failure. The outcome is persisted on the stage (op_* fields)
+        AND pushed to the user as a bus toast (auto-download when 'url' is present).
+
+        Authorization MUST already have been checked by the caller (in the request,
+        as the real user) before calling this."""
+        self.ensure_one()
+        # Concurrency guard: never launch a second operation while one is already
+        # running on this instance — this is what stops rapid double-clicks of
+        # Start/Stop/Restart/Check-Status from firing duplicate ansible runs. The
+        # row is locked (FOR UPDATE) so two near-simultaneous requests can't both
+        # read 'idle' before either writes 'running'; the lock is released the
+        # moment this short request commits (the slow work runs in a thread).
+        self.env.cr.execute(
+            "SELECT op_state FROM server_stage WHERE id = %s FOR UPDATE", [self.id])
+        row = self.env.cr.fetchone()
+        if row and row[0] == 'running':
+            return self._busy_toast()
+        self.sudo().write({'op_label': label, 'op_state': 'running',
+                           'op_time': fields.Datetime.now(), 'op_detail': False})
+        stage_id, dbname, uid = self.id, self.env.cr.dbname, self.env.uid
+
+        def _worker():
+            import time as _time
+            import odoo
+            # Phase 1 — run the side-effecting work (ansible) exactly ONCE. We do not
+            # persist anything here; `work` returns a dict and only the result write
+            # in phase 2 touches the DB (so a retry never re-runs ansible).
+            try:
+                with odoo.registry(dbname).cursor() as cr:
+                    env = api.Environment(cr, uid, {})
+                    stage = env['server.stage'].browse(stage_id)
+                    if not stage.exists():
+                        return
                     try:
-                        results[rid] = fut.result()
-                    except Exception:
-                        results[rid] = 'stopped'
-        now = fields.Datetime.now()
-        for rec in self:
-            rec.odoo_status = results.get(rec.id, 'unknown')
-            rec.last_status_check = now
-        return self._notify(_('🔄 Status refreshed for %s instance(s).') % len(self))
+                        res = work(stage.sudo()) or {}
+                    except Exception as exc:  # noqa: BLE001 — report, never crash
+                        _logger.exception("Background op %r failed for stage %s",
+                                          label, stage_id)
+                        res = {'ok': False, 'message': (str(exc) or repr(exc))[-1500:]}
+                    cr.rollback()  # drop ORM reads; the ansible side effect already ran
+            except Exception as exc:  # noqa: BLE001
+                _logger.exception("Background op %r crashed for stage %s", label, stage_id)
+                res = {'ok': False, 'message': (str(exc) or repr(exc))[-1500:]}
+
+            ok = bool(res.get('ok'))
+            message = res.get('message') or (
+                _('%s finished.') % label if ok else _('%s failed.') % label)
+            # Last Operation Details shows ERRORS ONLY: empty on success, the cleaned
+            # failure error (no raw PLAY/TASK/RECAP) on failure.
+            detail = _clean_ansible_log(res.get('detail') or message, ok)
+            url = res.get('url') or False
+            title = ('✅ %s' % label) if ok else ('❌ %s' % label)
+            vals = {'op_state': 'done' if ok else 'failed',
+                    'op_time': fields.Datetime.now(), 'op_detail': detail}
+            if ok and res.get('odoo_status'):
+                vals['odoo_status'] = res['odoo_status']
+                vals['service_status'] = bool(res.get('service_status'))
+                vals['last_status_check'] = fields.Datetime.now()
+            elif ok and 'service_status' in res:
+                vals['service_status'] = bool(res['service_status'])
+
+            # Phase 2 — persist the result + push the toast, retrying on a concurrent
+            # update (REPEATABLE READ raises a serialization error when, e.g., the
+            # status cron writes the same row at the same moment). Background threads
+            # don't get Odoo's request-level retry, so we do it ourselves — otherwise
+            # the result write rolls back and the op is stuck on 'running'.
+            for attempt in range(5):
+                try:
+                    with odoo.registry(dbname).cursor() as cr:
+                        env = api.Environment(cr, uid, {})
+                        stage = env['server.stage'].browse(stage_id)
+                        if stage.exists():
+                            stage.sudo().write(vals)
+                        env['server.stage']._send_op_bus(
+                            uid, ok, title, message, sticky=not ok, url=url,
+                            reload=reload and ok)  # one bus row per successful commit
+                        cr.commit()
+                    break
+                except Exception:  # noqa: BLE001 — serialization/lock conflict, retry
+                    _logger.warning("Persist op result for stage %s: attempt %s failed, "
+                                    "retrying", stage_id, attempt + 1)
+                    _time.sleep(0.5 * (attempt + 1))
+            else:
+                _logger.error("Gave up persisting op result for stage %s", stage_id)
+
+        import threading
+        threading.Thread(target=_worker, name='odoo-stage-op', daemon=True).start()
+        return self._op_started_toast(label)
 
     @api.model
     def _cron_refresh_status(self):
-        """Background job: refresh every instance's running/stopped status so the
-        UI stays current without anyone pressing 'Check Status'. Probes run in
-        parallel (see action_check_status)."""
-        stages = self.search([])
-        if stages:
-            stages.action_check_status()
+        """Background job: refresh every instance's real (systemd) status over SSH,
+        per host, so the list stays current. Commits per host (with serialization
+        retry) for resilience — see server.host._refresh_and_commit."""
+        for host in self.env['server.host'].search([]):
+            host._refresh_and_commit('_refresh_status', "Status refresh")
 
     def _build_inventory(self):
         """Inventory for this stage — connection comes entirely from its host."""
@@ -450,6 +764,11 @@ class Stage(models.Model):
         """Return this instance's cached custom-module list (from discovery)."""
         self.ensure_one()
         return [l for l in (self.available_modules or '').splitlines() if l.strip()]
+
+    def _cached_odoo_modules(self):
+        """Return this instance's cached Odoo core-module list (from discovery)."""
+        self.ensure_one()
+        return [l for l in (self.available_odoo_modules or '').splitlines() if l.strip()]
 
     @api.model
     def _run_ansible_playbook(self, playbook, inventory, extra_vars=None, timeout=None):
@@ -506,6 +825,12 @@ class Stage(models.Model):
                 env = os.environ.copy()
                 kh = self._known_hosts_file()
                 env.update({
+                    # Force a UTF-8 locale so ansible never aborts with "could not
+                    # initialize the preferred locale" when the Odoo process happens
+                    # to run with an unset/degraded locale (e.g. under a background
+                    # thread or a sudo shell). C.UTF-8 is always present.
+                    'LC_ALL': 'C.UTF-8',
+                    'LANG': 'C.UTF-8',
                     'ANSIBLE_HOST_KEY_CHECKING': 'True',
                     'ANSIBLE_SSH_ARGS': f'-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={kh}',
                     # When a task drops to an unprivileged user (become_user: odoo)
@@ -594,8 +919,9 @@ class Stage(models.Model):
         self.ensure_one()
         dbs = self._cached_databases()
         mods = self._cached_modules()
+        odoo_mods = self._cached_odoo_modules()
         ctx = dict(self.env.context, default_stage_id=self.id,
-                   db_list=dbs, module_list=mods)
+                   db_list=dbs, module_list=mods, odoo_module_list=odoo_mods)
         if dbs:
             ctx['default_database_name'] = dbs[0]
         return {
@@ -676,44 +1002,46 @@ class Stage(models.Model):
             'context': {'default_stage_id': self.id},
         }
 
+    def _service_action_work(self, playbook_file, ok_status, ok_message):
+        """Build a `work` closure (for _run_bg) that runs a service playbook and, on
+        success, RETURNS the resulting status (the worker persists it in its own
+        retryable transaction — work itself must not write the DB, since _run_bg
+        rolls back phase 1)."""
+        playbook = os.path.join(os.path.dirname(__file__),
+                                '../ansible/playbooks/%s' % playbook_file)
+
+        def work(stage):
+            result = stage._run_ansible_playbook(
+                playbook, stage._build_inventory(),
+                {'service_name': stage.service_name})
+            if result['success']:
+                return {'ok': True, 'message': ok_message, 'detail': result['output'],
+                        'odoo_status': ok_status, 'service_status': ok_status == 'running'}
+            return {'ok': False,
+                    'message': _('Failed — see Last Operation Details.'),
+                    'detail': result['output']}
+        return work
+
     def action_restart_service(self):
         self._check_action_access()
-        self = self.sudo()
         self.ensure_one()
-        inventory = self._build_inventory()
-        playbook = os.path.join(os.path.dirname(__file__), '../ansible/playbooks/restart_service.yml')
-
-        result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
-        if result['success']:
-            self.service_status = True
-            return self._notify(_('🔁Service restarted successfully'))
-        raise UserError(_('❌Failed to restart service: %s') % result['output'])
+        return self.sudo()._run_bg(_('Restart service'), self._service_action_work(
+            'restart_service.yml', 'running', _('🔁 Service restarted successfully')),
+            reload=True)
 
     def action_stop_service(self):
         self._check_action_access()
-        self = self.sudo()
         self.ensure_one()
-        inventory = self._build_inventory()
-        playbook = os.path.join(os.path.dirname(__file__), '../ansible/playbooks/stop_service.yml')
-
-        result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
-        if result['success']:
-            self.service_status = False
-            return self._notify(_('🛑Service stopped successfully'))
-        raise UserError(_('❌Failed to stop service: %s') % result['output'])
+        return self.sudo()._run_bg(_('Stop service'), self._service_action_work(
+            'stop_service.yml', 'stopped', _('🛑 Service stopped successfully')),
+            reload=True)
 
     def action_start_service(self):
         self._check_action_access()
-        self = self.sudo()
         self.ensure_one()
-        inventory = self._build_inventory()
-        playbook = os.path.join(os.path.dirname(__file__), '../ansible/playbooks/start_service.yml')
-
-        result = self._run_ansible_playbook(playbook, inventory, {'service_name': self.service_name})
-        if result['success']:
-            self.service_status = True
-            return self._notify(_('🟢Service started successfully'))
-        raise UserError(_('❌Failed to start service: %s') % result['output'])
+        return self.sudo()._run_bg(_('Start service'), self._service_action_work(
+            'start_service.yml', 'running', _('🟢 Service started successfully')),
+            reload=True)
 
     def action_backup_database(self):
         self._check_action_access()
@@ -736,9 +1064,10 @@ class Stage(models.Model):
     # ===========================
     def _notify(self, message):
         """Show a success notification that auto-dismisses (no X needed), then
-        soft-reload the view. `sticky=False` lets it fade like Odoo's own toasts;
-        `soft_reload` refreshes the current view/status without a full browser
-        reload."""
+        refresh the view IN PLACE. `sticky=False` lets it fade like Odoo's own
+        toasts; `server_mgmt_soft_reload` reloads the current record's data without
+        leaving it (unlike the core `soft_reload`, which restores the controller
+        and can bounce the user to a blank/new record)."""
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
@@ -747,6 +1076,6 @@ class Stage(models.Model):
                 'title': _('Success'),
                 'message': message,
                 'sticky': False,
-                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+                'next': {'type': 'ir.actions.client', 'tag': 'server_mgmt_soft_reload'},
             },
         }

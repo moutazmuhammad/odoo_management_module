@@ -1,6 +1,6 @@
 {
     'name': 'Odoo Server Management',
-    'version': '1.1',
+    'version': '1.27',
     'summary': 'Manage multiple Odoo servers with Ansible integration',
     'description': """
         This module allows centralized management of multiple Odoo servers using Ansible.
@@ -11,7 +11,7 @@
     'website': 'https://github.com/moutazmuhammad',
     'category': 'Administration',
     'license': 'LGPL-3',
-    'depends': ['base', 'auth_signup'],
+    'depends': ['base', 'auth_signup', 'bus'],
     # Live logs stream via Server-Sent Events from the Odoo controller itself
     # (ssh `tail -f`), so no paramiko/websockets and no separate process are
     # needed — just the ssh client and ansible-playbook on the Odoo host.
@@ -30,7 +30,6 @@
         'views/stage_views.xml',
         'views/pull_code.xml',
         'views/github_settings.xml',
-        'views/backup_project_views.xml',
         'views/pull_code_wizard.xml',
         'views/view_conf_wizard.xml',
         'views/upgrade_module_wizard.xml',
@@ -40,7 +39,9 @@
     ],
     'assets': {
         'web.assets_backend': [
+            'odoo_server_management/static/src/js/stage_reload.js',
             'odoo_server_management/static/src/js/stage_autorefresh.js',
+            'odoo_server_management/static/src/js/stage_ops.js',
         ],
     },
     'installable': True,
