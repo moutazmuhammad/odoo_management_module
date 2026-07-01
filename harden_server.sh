@@ -107,6 +107,23 @@ log "3+4. SSH: port $SSH_PORT, disable password auth"
 mkdir -p /etc/ssh/sshd_config.d
 cp -n /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.harden 2>/dev/null || true
 
+# Make sure the drop-in directory is actually read. Without this Include line the
+# whole 00-hardening.conf (port AND PasswordAuthentication) is silently ignored.
+if ! grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config 2>/dev/null; then
+  # Prepend so the drop-in wins for first-match keywords (PasswordAuthentication, etc.)
+  printf 'Include /etc/ssh/sshd_config.d/*.conf\n%s' "$(cat /etc/ssh/sshd_config 2>/dev/null)" > /etc/ssh/sshd_config
+  echo "  added missing 'Include /etc/ssh/sshd_config.d/*.conf' to sshd_config"
+fi
+
+# sshd listens on EVERY uncommented 'Port' line, so a stray 'Port 22' in the main
+# config or another drop-in keeps 22 open. Comment them all out; 00-hardening.conf
+# (written below) becomes the only Port source.
+sed -ri 's/^([[:space:]]*Port[[:space:]].*)$/#\1/I' /etc/ssh/sshd_config 2>/dev/null || true
+for f in /etc/ssh/sshd_config.d/*.conf; do
+  [ "$f" = /etc/ssh/sshd_config.d/00-hardening.conf ] && continue
+  [ -f "$f" ] && sed -ri 's/^([[:space:]]*Port[[:space:]].*)$/#\1/I' "$f" 2>/dev/null || true
+done
+
 # Disable password login only when a real key is in place (avoid lockout).
 PWLINE="PasswordAuthentication no"
 if [ "$KEY_OK" -ne 1 ]; then
@@ -132,7 +149,10 @@ if [ "$KEY_OK" -eq 1 ]; then
 fi
 
 # Ubuntu 22.10+/24.04 are socket-activated: the port lives on ssh.socket, not sshd_config.
-if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.socket'; then
+# Treat it as socket-activated only when the socket unit is actually enabled/active;
+# a present-but-disabled ssh.socket means the standalone service owns the port.
+if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.socket' \
+   && { systemctl is-active --quiet ssh.socket 2>/dev/null || systemctl is-enabled --quiet ssh.socket 2>/dev/null; }; then
   mkdir -p /etc/systemd/system/ssh.socket.d
   # Bind BOTH IPv4 and IPv6 explicitly. The base ssh.socket sets
   # BindIPv6Only=ipv6-only, so a bare "ListenStream=<port>" binds IPv6-only and
@@ -160,13 +180,29 @@ fi
 # Validate, then apply.
 if sshd -t; then
   if [ "$SOCKET" -eq 1 ]; then
+    # Socket-activated: the socket owns the port. Stop any standalone sshd first so
+    # it can't keep holding :22, then rebind the socket to the new port.
+    systemctl stop ssh.service 2>/dev/null || true
     systemctl restart ssh.socket 2>/dev/null || true
-    systemctl restart ssh.service 2>/dev/null || true
   else
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
   fi
-  echo "  applied. Listening sockets on $SSH_PORT:"
-  ss -ltnp 2>/dev/null | grep -E ":$SSH_PORT\b" || echo "    (none yet — check 'systemctl status ssh')"
+
+  # Verify the outcome instead of assuming it worked.
+  sleep 1
+  echo "  applied. Current SSH listeners:"
+  ss -ltn 2>/dev/null | grep -E ':(22|'"$SSH_PORT"')\b' | sed 's/^/    /' || true
+  if ss -ltn 2>/dev/null | grep -qE ":$SSH_PORT\b"; then
+    echo "  OK: listening on $SSH_PORT."
+  else
+    echo "  WARNING: nothing is listening on $SSH_PORT yet — check 'systemctl status ssh ssh.socket'."
+  fi
+  if ss -ltn 2>/dev/null | grep -qE ':22\b'; then
+    echo "  WARNING: port 22 is STILL open. Remaining 'Port 22' sources to check:"
+    grep -RHniE '^[[:space:]]*Port[[:space:]]+22\b' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | sed 's/^/    /'
+    systemctl is-active --quiet ssh.socket 2>/dev/null && \
+      echo "    ssh.socket is active — verify /etc/systemd/system/ssh.socket.d/port.conf and re-run 'systemctl daemon-reload; systemctl restart ssh.socket'."
+  fi
 else
   echo "  ERROR: 'sshd -t' failed; NOT restarting SSH. Fix the config before disconnecting."
   exit 1
@@ -187,22 +223,25 @@ for f in /root/.s3cfg /etc/s3cfg /home/*/.s3cfg \
   echo "  removed credential file: $f"
 done
 
-# 5b. Backup cron jobs that reference s3cmd/.s3cfg/Spaces — remove the invoked
-#     scripts (when they're clearly S3 backup scripts) and strip the cron lines.
+# 5b. Backup cron jobs that reference s3cmd/.s3cfg/Spaces — disable the invoked
+#     scripts (when they're clearly S3 backup scripts) and comment out the cron lines.
 PAT='s3cmd|\.s3cfg|digitaloceanspaces|aws s3'
 for cf in /etc/crontab /etc/cron.d/* /etc/cron.hourly/* /etc/cron.daily/* \
           /var/spool/cron/crontabs/* /var/spool/cron/*; do
   [ -f "$cf" ] || continue
+  case "$cf" in *.bak.harden) continue ;; esac
   grep -qiE "$PAT" "$cf" 2>/dev/null || continue
-  # Remove scripts invoked by the offending lines (only if they look like S3 backups).
-  grep -iE "$PAT" "$cf" | grep -oE '/[A-Za-z0-9_./-]+\.(sh|py|bash)' | sort -u | while read -r scr; do
+  grep -iE "$PAT" "$cf" | grep -qvE '^[[:space:]]*#' || continue
+  # Disable scripts invoked by the offending lines (only if they look like S3 backups).
+  grep -iE "$PAT" "$cf" | grep -vE '^[[:space:]]*#' \
+    | grep -oE '/[A-Za-z0-9_./-]+\.(sh|py|bash)' | sort -u | while read -r scr; do
     if [ -f "$scr" ] && grep -qiE 's3cmd|secret_key|access_key|digitaloceanspaces' "$scr" 2>/dev/null; then
-      rm -f "$scr" && echo "  removed S3 backup script: $scr"
+      chmod -x "$scr" 2>/dev/null && echo "  disabled S3 backup script (chmod -x): $scr"
     fi
   done
   cp -n "$cf" "$cf.bak.harden" 2>/dev/null || true
-  sed -ri "/($PAT)/Id" "$cf"
-  echo "  stripped S3 backup cron lines from: $cf"
+  sed -ri "/($PAT)/I{/^[[:space:]]*#/!s/^/#/}" "$cf"
+  echo "  commented out S3 backup cron lines in: $cf"
 done
 
 # 5c. Report (do NOT auto-delete) leftover S3 BACKUP scripts/configs. Narrow to a
@@ -217,6 +256,67 @@ for d in /usr/local/bin /opt /root /home /srv; do
     echo "  NOTE: $scr looks like a leftover S3 backup script/config — review/remove manually"
   done
 done
+
+# 5d. Remove ANY daily backup cron job (not just S3). Matches common backup tools.
+log "5d. Removing daily backup cron jobs"
+BACKUP_RE='backup|pg_dump|pg_dumpall|mysqldump|mariadb-dump|mongodump|borg|restic|duplicity|rsnapshot|rdiff-backup|bacula|bareos|tarsnap'
+
+# /etc/cron.daily runs everything in it once a day — disable scripts that are backups
+# (chmod -x so cron.daily skips them; reversible, nothing deleted).
+if [ -d /etc/cron.daily ]; then
+  for scr in /etc/cron.daily/*; do
+    [ -f "$scr" ] || continue
+    case "$(basename "$scr")" in *.bak.harden) continue ;; esac
+    if grep -qiE "$BACKUP_RE" "$scr" 2>/dev/null || case "$(basename "$scr")" in *backup*|*dump*) true ;; *) false ;; esac; then
+      chmod -x "$scr" 2>/dev/null && echo "  disabled daily backup script (chmod -x): $scr"
+    fi
+  done
+fi
+
+# Comment out (do NOT delete) daily backup lines in every crontab-style file
+# (system + per-user 'crontab -e' spools). Originals saved as *.bak.harden.
+for cf in /etc/crontab /etc/cron.d/* \
+          /var/spool/cron/crontabs/* /var/spool/cron/*; do
+  [ -f "$cf" ] || continue
+  case "$cf" in *.bak.harden) continue ;; esac
+  grep -qiE "$BACKUP_RE" "$cf" 2>/dev/null || continue
+  # Skip files where the only matches are already commented.
+  grep -iE "$BACKUP_RE" "$cf" | grep -qvE '^[[:space:]]*#' || continue
+  cp -n "$cf" "$cf.bak.harden" 2>/dev/null || true
+  # Disable the invoked backup scripts (chmod -x) when they clearly do backups.
+  grep -iE "$BACKUP_RE" "$cf" | grep -vE '^[[:space:]]*#' \
+    | grep -oE '/[A-Za-z0-9_./-]+\.(sh|py|bash)' | sort -u | while read -r scr; do
+    if [ -f "$scr" ] && grep -qiE "$BACKUP_RE" "$scr" 2>/dev/null; then
+      chmod -x "$scr" 2>/dev/null && echo "  disabled backup script referenced by cron (chmod -x): $scr"
+    fi
+  done
+  # Prefix each uncommented backup line with '#' instead of removing it.
+  sed -ri "/(${BACKUP_RE})/I{/^[[:space:]]*#/!s/^/#/}" "$cf"
+  echo "  commented out backup cron lines in: $cf"
+done
+echo "  done commenting backup cron jobs (originals saved as *.bak.harden)"
+
+# 5e. Show each user's live crontab (via 'crontab -l -u') so you can confirm exactly
+#     what is left / what got commented. Read-only — changes nothing.
+log "5e. Per-user crontabs after hardening (crontab -l -u <user>)"
+if command -v crontab >/dev/null 2>&1; then
+  # Users that actually have a crontab: spool files + every account in /etc/passwd.
+  { for sp in /var/spool/cron/crontabs/* /var/spool/cron/*; do
+      [ -f "$sp" ] && basename "$sp"
+    done
+    cut -d: -f1 /etc/passwd
+  } 2>/dev/null | sort -u | while read -r u; do
+    [ -n "$u" ] || continue
+    case "$u" in *.bak.harden) continue ;; esac
+    getent passwd "$u" >/dev/null 2>&1 || continue
+    out="$(crontab -l -u "$u" 2>/dev/null)" || continue
+    [ -n "$out" ] || continue
+    echo "  --- $u ---"
+    printf '%s\n' "$out" | sed 's/^/    /'
+  done
+else
+  echo "  'crontab' not installed — skipping per-user dump."
+fi
 
 log "DONE"
 echo "Reconnect with:  ssh -p $SSH_PORT <user>@<server>"
