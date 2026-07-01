@@ -4,7 +4,6 @@ import json
 import math
 import time
 import base64
-import secrets
 import logging
 
 import psycopg2
@@ -703,20 +702,11 @@ class ServerHost(models.Model):
         threading.Thread(target=_worker, name='odoo-host-backup', daemon=True).start()
         return self.env['server.stage']._op_started_toast(label, reload=True)
 
-    def _ensure_agent_token(self):
-        # Read AND write via sudo: agent_token is an admin-only field, so reading
-        # it without sudo can return empty in some contexts and wrongly
-        # regenerate the token on every deploy (desyncing the agent config).
-        self.ensure_one()
-        rec = self.sudo()
-        if not rec.agent_token:
-            rec.agent_token = secrets.token_urlsafe(32)
-        return rec.agent_token
-
     def action_deploy_agent(self):
         """Install the self-backup agent + a daily Linux cron on this server. The
-        server then backs itself up (presign-on-demand) with no Spaces key stored
-        locally; the manager's daily cron skips this host afterwards."""
+        server then backs itself up (presign-on-demand) with NO secret stored
+        locally — the manager identifies the agent by its source IP — and the
+        manager's daily cron skips this host afterwards."""
         self.env['server.stage']._check_access(GROUP_OPERATOR)
         self.ensure_one()
         self._require_key()
@@ -742,9 +732,7 @@ class ServerHost(models.Model):
         except (TypeError, ValueError):
             hour = 2
         hour = max(0, min(23, hour))
-        token = self._ensure_agent_token()
         res = self._run('deploy_agent.yml', {
-            'agent_token': token,
             'manager_url': manager_url,
             'host_header': host_header,
             'backup_hour': hour,

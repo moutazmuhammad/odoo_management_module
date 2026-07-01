@@ -24,16 +24,18 @@
         dest: /opt/odoo-backup/agent.py
         mode: '0755'
 
-    - name: Write agent config (root-only; token, not a cloud key)
+    - name: Write agent config (NO secret — the manager identifies us by source IP)
       copy:
         dest: /etc/odoo-backup.conf
-        mode: '0600'
+        mode: '0644'
         owner: root
         group: root
         content: |
+          # No secret is stored here. The manager authenticates this agent by its
+          # source IP (recorded as the host's IP); it only ever hands back
+          # short-lived pre-signed upload URLs at run time.
           manager_url = {{ manager_url }}
           host_header = {{ host_header | default('') }}
-          token = {{ agent_token }}
           extra_dbs = {{ extra_dbs | default('') }}
           insecure = {{ insecure | default('0') }}
           agent_version = {{ agent_version | default('') }}

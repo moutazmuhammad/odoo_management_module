@@ -18,9 +18,20 @@ class BackupAgentController(http.Controller):
     """Presign service for the per-server backup agents. Each managed server runs
     a local cron agent that detects its exposed DBs, asks here for short-lived
     upload URLs, uploads directly to the Space, then reports back. The Spaces key
-    NEVER leaves the manager; the agent only ever holds a throwaway URL during the
-    run, plus a low-privilege per-host token that can only mint URLs under that
-    host's own prefix."""
+    NEVER leaves the manager, and no secret is stored on the managed server: the
+    agent is identified by its SOURCE IP (which the manager already records as the
+    host's IP), so it only ever holds a throwaway upload URL during a run.
+
+    The manager's nginx overwrites X-Forwarded-For with the real connection IP
+    ($remote_addr) on these routes, and Odoo runs with proxy_mode=True, so the
+    source IP cannot be spoofed by the client. A legacy per-host token is still
+    accepted as a fallback to keep older agents working during migration."""
+
+    def _client_ip(self):
+        """Real source IP of the calling agent. With proxy_mode=True Odoo reads it
+        from X-Forwarded-For, which the manager's nginx sets to $remote_addr for
+        the agent routes (so a client cannot forge it)."""
+        return (request.httprequest.remote_addr or '').strip()
 
     def _host_for_token(self, token):
         token = (token or '').strip()
@@ -29,6 +40,18 @@ class BackupAgentController(http.Controller):
         return request.env['server.host'].sudo().search(
             [('agent_token', '=', token)], limit=1) or None
 
+    def _host_for_request(self, token=None):
+        """Resolve the calling host with NO secret on the managed server: match the
+        source IP against the known host IP. Falls back to the legacy token if an
+        older agent still sends one (eases migration)."""
+        ip = self._client_ip()
+        if ip:
+            host = request.env['server.host'].sudo().search(
+                [('ip', '=', ip)], limit=1)
+            if host:
+                return host
+        return self._host_for_token(token)
+
     @http.route('/server_backup/agent/dblist', type='json', auth='public',
                 methods=['POST'], csrf=False)
     def dblist(self, token=None, **kw):
@@ -36,17 +59,17 @@ class BackupAgentController(http.Controller):
         every database of every stage (with its path segment), kept fresh on the
         manager by discovery + the 15-min DB-refresh cron. The agent fetches this
         every run so it always has the newest set."""
-        host = self._host_for_token(token)
+        host = self._host_for_request(token)
         if not host:
-            return {'error': 'invalid token'}
+            return {'error': 'unknown host (source IP not recognised)'}
         return {'targets': host._backup_targets()}
 
     @http.route('/server_backup/agent/presign', type='json', auth='public',
                 methods=['POST'], csrf=False)
     def presign(self, token=None, dbs=None, **kw):
-        host = self._host_for_token(token)
+        host = self._host_for_request(token)
         if not host:
-            return {'error': 'invalid token'}
+            return {'error': 'unknown host (source IP not recognised)'}
         Storage = request.env['server.backup.storage'].sudo()
         if not Storage._keys_set():
             return {'error': 'storage not configured'}
@@ -96,9 +119,9 @@ class BackupAgentController(http.Controller):
     def finalize(self, token=None, results=None, done=False, **kw):
         """Called once PER DATABASE (complete/abort its multipart), and once more
         at the end with done=True to prune old objects + stamp last_backup."""
-        host = self._host_for_token(token)
+        host = self._host_for_request(token)
         if not host:
-            return {'error': 'invalid token'}
+            return {'error': 'unknown host (source IP not recognised)'}
         Storage = request.env['server.backup.storage'].sudo()
         ok = 0
         for db, res in (results or {}).items():

@@ -90,7 +90,9 @@ def post(url, payload, insecure=False, host_header='', timeout=180):
 def main():
     cfg = load_conf()
     base = cfg['manager_url'].rstrip('/')
-    token = cfg['token']
+    # No secret is stored on this server: the manager identifies us by source IP.
+    # A token is only sent if a legacy config still has one (migration fallback).
+    token = cfg.get('token', '').strip()
     host_header = cfg.get('host_header', '').strip()
     insecure = cfg.get('insecure', '0') in ('1', 'true', 'True')
     force = [x.strip() for x in cfg.get('extra_dbs', '').replace('\n', ',').split(',')
