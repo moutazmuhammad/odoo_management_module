@@ -15,9 +15,14 @@ except ImportError:
 
 
 def sh(cmd):
+    # NOTE: capture_output= and text= are Python 3.7+. Target servers may run
+    # Python 3.6 (e.g. Ubuntu 18.04), where those kwargs raise TypeError and this
+    # whole function silently returns "" — making discovery find nothing. Use the
+    # 3.6-compatible stdout/stderr=PIPE + universal_newlines instead.
     try:
-        return subprocess.run(cmd, shell=True, capture_output=True,
-                              text=True, timeout=60).stdout.strip()
+        return subprocess.run(cmd, shell=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, timeout=60).stdout.strip()
     except Exception:
         return ""
 
@@ -372,7 +377,8 @@ def web_base_url_domain(conf):
         if db_pass:
             env['PGPASSWORD'] = db_pass
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=12)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, env=env, timeout=12)
         val = r.stdout.strip() if r.returncode == 0 else ''
     except Exception:
         val = ''
