@@ -19,11 +19,11 @@ set -u
 # of this list (see active_fingerprints below), so running this on a new server
 # can't lock out the very session you're running it from.
 PUBKEYS=(
+  # The Odoo Server Management module SSHes into managed servers as puppexuser
+  # using THIS key (it is the module's global server.ssh.private_key), so it must
+  # stay authorized on every hardened server or the manager loses discovery/
+  # backups/status access. It doubles as the admin key.
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIjDxiPBJfceBw6BuMEVWDY6g7PHfWDdLgLmXqrkkWdA moutazmuhammad1997@gmail.com"
-  # Odoo Server Management module key — the manager SSHes to puppexuser with this
-  # to run discovery/backups/status. MUST stay authorized or the module loses
-  # access to every hardened server. (Public key; safe to keep in the repo.)
-  "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCnZb30/l5n4k263ZxexqWyMZGenZaxfnGHhZ1cQdlXAJQiuG6X4eJ7cvFWJ8AYQJRU7x/MnSZmNqb+/QG0tff2Po2tAtcfLYw/pKr1PBm+gN2IYGCncMqQdBfHxAsCmof6n4d/pogXOLONcsrThXWDLIcsNdSS1HxsbxHTNjnKt+MM04piRM/2kWZEs9dxLzOELaktCwJwGiqV7Tud/K6h8Dji4bu70deoPDIFMHxEQQtrpJI1fedy4JgnVkoD6lYgYgRx8Gae3MEd9VQfsPazu/vugRJdBkdZxB0xURS+BiBkfWUKOrbovKEqX+2nAPKFgYfTP5qJviDwNiP+ZEEz odoo@expert-odoo11"
 )
 
 SSH_PORT=7812
