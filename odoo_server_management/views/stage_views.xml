@@ -10,6 +10,7 @@
                          can_act = False means: Client Server + current user is not Operator+. -->
                     <field name="client_stage" invisible="1"/>
                     <field name="can_act" invisible="1"/>
+                    <field name="host_backup_category" invisible="1"/>
                     <field name="odoo_status_live" nolabel="1" readonly="1" style="font-weight: bold;"/>
                     <button name="action_check_status_now" type="object" string="Check Status"
                             class="btn-secondary" icon="fa-refresh"
@@ -63,7 +64,7 @@
                             string="Sync Domain → Nginx" class="btn-secondary" icon="fa-globe"
                             groups="odoo_server_management.group_devops"
                             confirm="Overwrite this instance's nginx server_name with the Stage Name domain and reload nginx on the server?"
-                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': ['|', ('op_state', '=', 'running'), ('host_backup_category', '!=', 'odex')]}"/>
                 </header>
 
                 <sheet>
@@ -91,9 +92,9 @@
                             <group>
                                 <group>
                                     <field name="host_id"/>
-                                    <field name="service_name"/>
+                                    <field name="service_name" readonly="1"/>
                                     <field name="odoo_version"/>
-                                    <field name="needs_review" readonly="1"/>
+                                    <field name="needs_review"/>
                                 </group>
                                 <group>
                                     <field name="log_file_path"/>
@@ -104,6 +105,22 @@
                                     <field name="python_bin"/>
                                 </group>
                             </group>
+                            <div class="alert alert-warning" role="alert"
+                                 attrs="{'invisible': [('needs_review', '=', False)]}">
+                                <strong>⚠ Needs review:</strong>
+                                <field name="review_reason" readonly="1" nolabel="1"
+                                       attrs="{'invisible': [('review_reason', '=', False)]}"/>
+                            </div>
+                            <div class="alert alert-info" role="alert"
+                                 attrs="{'invisible': [('overridden_fields', '=', False)]}">
+                                <strong>🔒 Manual overrides active.</strong>
+                                Discovery will not overwrite the field(s) you edited:
+                                <field name="overridden_fields" readonly="1" nolabel="1"/>
+                                <button name="action_resume_discovery_sync" type="object"
+                                        string="Resume Auto-Sync" class="btn-link"
+                                        icon="fa-refresh"
+                                        confirm="Let discovery manage every field on this instance again? Your manual edits will be refreshed from the server on the next Discover."/>
+                            </div>
                         </page>
 
                         <page string="Access Info" groups="odoo_server_management.group_devops">

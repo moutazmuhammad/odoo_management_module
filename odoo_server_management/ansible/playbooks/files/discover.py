@@ -384,8 +384,26 @@ def parse_nginx():
                 ports.extend(upstreams.get(up, []))
             for prt in ports:
                 cur = port_info.get(prt)
-                if cur is None or (not cur.get('domain') and primary):
-                    port_info[prt] = {'domain': primary, 'listen': listen, 'file': path}
+                if cur is None:
+                    port_info[prt] = {'domain': primary, 'listen': listen,
+                                      'file': path, 'domains': list(domains)}
+                    continue
+                # Keep the first non-empty domain as the CHOSEN one (stable across
+                # runs), but record EVERY distinct domain that fronts this backend
+                # port — whether they come from separate `server {}` blocks OR from
+                # one `server_name a.com b.com;` line (all of `domains`, not just the
+                # first). When more than one meaningfully-different domain maps to the
+                # same port (e.g. an apex domain and a subdomain both proxy_pass the
+                # same Odoo), the choice is ambiguous — discovery cannot know which
+                # the operator considers canonical, so it flags the instance for
+                # manual review instead of silently picking one.
+                if not cur.get('domain') and primary:
+                    cur['domain'] = primary
+                    cur['listen'] = listen
+                    cur['file'] = path
+                for d in domains:
+                    if d and d not in cur['domains']:
+                        cur['domains'].append(d)
     return port_info
 
 
@@ -523,6 +541,15 @@ def scan_unit(unit):
     domain = nginx.get('domain') or ''
     nginx_file = nginx.get('file') or ''
     pub_port = '' if domain else (nginx.get('listen') or str(http_port or ''))
+    # Every distinct domain that fronts this instance's port — gathered across all
+    # server blocks AND multi-name `server_name` lines. When more than one exists,
+    # discovery had to pick one (kept in `domain`) but the mapping is ambiguous, so
+    # it is surfaced for manual review. `www.` aliases of the same apex (e.g.
+    # example.com + www.example.com) are NOT counted as different — that pairing is
+    # a routine alias, not a genuine choice.
+    domain_candidates = nginx.get('domains') or ([domain] if domain else [])
+    _apex = lambda d: re.sub(r'^www\.', '', (d or '').strip().lower())
+    domain_ambiguous = len({_apex(d) for d in domain_candidates if d}) > 1
 
     return {
         'service_name': unit[:-len('.service')] if unit.endswith('.service') else unit,
@@ -534,6 +561,8 @@ def scan_unit(unit):
         'log_file': log_file,
         'http_port': http_port,
         'domain': domain,
+        'domain_candidates': domain_candidates,
+        'domain_ambiguous': domain_ambiguous,
         'pub_port': pub_port,
         'nginx_file': nginx_file,
         'addons_path': addons_path,
