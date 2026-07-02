@@ -15,9 +15,14 @@ except ImportError:
 
 
 def sh(cmd):
+    # NOTE: capture_output= and text= are Python 3.7+. Target servers may run
+    # Python 3.6 (e.g. Ubuntu 18.04), where those kwargs raise TypeError and this
+    # whole function silently returns "" — making discovery find nothing. Use the
+    # 3.6-compatible stdout/stderr=PIPE + universal_newlines instead.
     try:
-        return subprocess.run(cmd, shell=True, capture_output=True,
-                              text=True, timeout=60).stdout.strip()
+        return subprocess.run(cmd, shell=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, timeout=60).stdout.strip()
     except Exception:
         return ""
 
@@ -224,22 +229,49 @@ for line in sh("systemctl list-units --type=service --all --no-legend --plain").
         units.add(parts[0])
 
 
-def conf_get(conf, key):
-    if not conf or not os.path.exists(conf):
-        return None
+def _read_text(path):
+    """Read a file, escalating via sudo when a plain read is denied. Odoo .conf
+    files are frequently 0600 root/odoo, so a non-root SSH user can't read them
+    directly — without this, http_port/addons_path/admin_passwd come back empty."""
+    if not path:
+        return ''
     try:
-        if configparser:
+        with open(path, errors='ignore') as fh:
+            return fh.read()
+    except Exception:
+        return run_as('', 'cat %s' % shlex.quote(path))
+
+
+def conf_get(conf, key):
+    """Value of `key` from an Odoo .conf ([options] section or bare key=val)."""
+    text = _read_text(conf)
+    if not text:
+        return None
+    if configparser:
+        try:
             cp = configparser.ConfigParser(strict=False)
-            cp.read(conf)
+            cp.read_string(text)
             if cp.has_section('options') and cp.has_option('options', key):
                 return cp.get('options', key).strip()
-        for ln in open(conf, 'r', errors='ignore'):
-            ln = ln.strip()
-            if ln.startswith(key) and '=' in ln:
-                return ln.split('=', 1)[1].strip()
-    except Exception:
-        return None
+        except Exception:
+            pass
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if ln.startswith(key) and '=' in ln:
+            return ln.split('=', 1)[1].strip()
     return None
+
+
+def _cmd_opt(toks, *names):
+    """Value of a `--opt value` or `--opt=value` command-line option (first hit).
+    Lets discovery read settings passed on the ExecStart line, not just the conf."""
+    for i, t in enumerate(toks):
+        for n in names:
+            if t == n and i + 1 < len(toks):
+                return toks[i + 1]
+            if t.startswith(n + '='):
+                return t.split('=', 1)[1]
+    return ''
 
 
 def detect_version(odoo_bin, python_bin):
@@ -289,6 +321,22 @@ def _extract_blocks(text, keyword):
     return blocks
 
 
+def _is_ip(tok):
+    """True for a bare IPv4/IPv6 literal (optionally with :port). Such a
+    server_name is not a routable domain — the instance is reached as IP:port,
+    so we must fall back to the nginx listen port instead of naming it by IP."""
+    host = tok.strip()
+    # strip an optional :port for IPv4 / hostnames (but not for bracketless IPv6)
+    if host.count(':') == 1:
+        host = host.split(':', 1)[0]
+    host = host.strip('[]')
+    if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):
+        return True
+    if ':' in host and re.match(r'^[0-9A-Fa-f:]+$', host):   # IPv6
+        return True
+    return False
+
+
 def parse_nginx():
     """Map a proxied Odoo port -> {'domain', 'listen', 'file'} from nginx configs.
 
@@ -322,7 +370,8 @@ def parse_nginx():
             for sn in re.findall(r'server_name\s+([^;]+);', block):
                 for tok in sn.split():
                     tok = tok.strip()
-                    if tok and tok not in ('_', 'localhost') and not tok.startswith('$'):
+                    if (tok and tok not in ('_', 'localhost')
+                            and not tok.startswith('$') and not _is_ip(tok)):
                         domains.append(tok)
             primary = domains[0] if domains else ''
             lm = re.search(r'listen\s+([^;]+);', block)
@@ -335,8 +384,26 @@ def parse_nginx():
                 ports.extend(upstreams.get(up, []))
             for prt in ports:
                 cur = port_info.get(prt)
-                if cur is None or (not cur.get('domain') and primary):
-                    port_info[prt] = {'domain': primary, 'listen': listen, 'file': path}
+                if cur is None:
+                    port_info[prt] = {'domain': primary, 'listen': listen,
+                                      'file': path, 'domains': list(domains)}
+                    continue
+                # Keep the first non-empty domain as the CHOSEN one (stable across
+                # runs), but record EVERY distinct domain that fronts this backend
+                # port — whether they come from separate `server {}` blocks OR from
+                # one `server_name a.com b.com;` line (all of `domains`, not just the
+                # first). When more than one meaningfully-different domain maps to the
+                # same port (e.g. an apex domain and a subdomain both proxy_pass the
+                # same Odoo), the choice is ambiguous — discovery cannot know which
+                # the operator considers canonical, so it flags the instance for
+                # manual review instead of silently picking one.
+                if not cur.get('domain') and primary:
+                    cur['domain'] = primary
+                    cur['listen'] = listen
+                    cur['file'] = path
+                for d in domains:
+                    if d and d not in cur['domains']:
+                        cur['domains'].append(d)
     return port_info
 
 
@@ -372,7 +439,8 @@ def web_base_url_domain(conf):
         if db_pass:
             env['PGPASSWORD'] = db_pass
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=12)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, env=env, timeout=12)
         val = r.stdout.strip() if r.returncode == 0 else ''
     except Exception:
         val = ''
@@ -393,25 +461,37 @@ def scan_unit(unit):
     if not m:
         return None
     execline = m.group(1).strip()
-    if 'odoo-bin' not in execline:
-        return None
     toks = execline.split()
-    odoo_bin = next((t for t in toks if t.endswith('odoo-bin')), '')
     python_bin = next((t for t in toks if re.search(r'/python[0-9.]*$', t)), '')
-    conf = None
-    for i, t in enumerate(toks):
-        if t in ('-c', '--config') and i + 1 < len(toks):
-            conf = toks[i + 1]
+    # Identify the Odoo entrypoint across install styles so detection isn't tied
+    # to one naming scheme: .../odoo-bin, .../odoo.py, a `odoo`/`openerp-server`
+    # console script (e.g. venv .../bin/odoo), or `python -m odoo` / `-m openerp`.
+    odoo_bin = ''
+    for t in toks:
+        base = t.rsplit('/', 1)[-1]
+        if base in ('odoo-bin', 'odoo.py', 'openerp-server'):
+            odoo_bin = t
             break
-        if t.startswith('--config='):
-            conf = t.split('=', 1)[1]
+        if base == 'odoo' and '/' in t and not os.path.isdir(t):
+            odoo_bin = t
             break
-        if t.startswith('-c='):
-            conf = t.split('=', 1)[1]
-            break
+    if not odoo_bin and re.search(r'-m\s+(odoo|openerp)\b', execline):
+        odoo_bin = python_bin or 'python3'
+    if not odoo_bin:
+        return None   # not an Odoo unit
+
+    # Config file: -c/--config (space or =form), else the usual default paths.
+    conf = _cmd_opt(toks, '-c', '--config') or None
+    if not conf:
+        for cand in ('/etc/odoo/odoo.conf', '/etc/odoo.conf', '/etc/openerp-server.conf'):
+            if os.path.exists(cand):
+                conf = cand
+                break
     um = re.search(r'^\s*User=(.*)$', cat, re.M)
     odoo_user = um.group(1).strip() if um else ''
-    http_port = conf_get(conf, 'http_port') or conf_get(conf, 'xmlrpc_port') or ''
+    # HTTP port: conf first, then the ExecStart command line, then Odoo's default.
+    http_port = (conf_get(conf, 'http_port') or conf_get(conf, 'xmlrpc_port')
+                 or _cmd_opt(toks, '--http-port', '--xmlrpc-port') or '8069')
 
     # Master password — only useful in plaintext; Odoo may store a pbkdf2 hash
     # (starts with "$") which cannot be replayed as the backup master_pwd.
@@ -419,7 +499,8 @@ def scan_unit(unit):
     if admin_pw.startswith('$'):
         admin_pw = ''
 
-    addons_path = conf_get(conf, 'addons_path') or ''
+    addons_path = (conf_get(conf, 'addons_path')
+                   or _cmd_opt(toks, '--addons-path') or '')
     repos = find_repos(addons_path, odoo_user)
     # Official Odoo repos (odoo/odoo, odoo/enterprise, ...) are the framework
     # source — nobody pulls them via this tool, so they are kept out of the pull
@@ -460,6 +541,15 @@ def scan_unit(unit):
     domain = nginx.get('domain') or ''
     nginx_file = nginx.get('file') or ''
     pub_port = '' if domain else (nginx.get('listen') or str(http_port or ''))
+    # Every distinct domain that fronts this instance's port — gathered across all
+    # server blocks AND multi-name `server_name` lines. When more than one exists,
+    # discovery had to pick one (kept in `domain`) but the mapping is ambiguous, so
+    # it is surfaced for manual review. `www.` aliases of the same apex (e.g.
+    # example.com + www.example.com) are NOT counted as different — that pairing is
+    # a routine alias, not a genuine choice.
+    domain_candidates = nginx.get('domains') or ([domain] if domain else [])
+    _apex = lambda d: re.sub(r'^www\.', '', (d or '').strip().lower())
+    domain_ambiguous = len({_apex(d) for d in domain_candidates if d}) > 1
 
     return {
         'service_name': unit[:-len('.service')] if unit.endswith('.service') else unit,
@@ -471,6 +561,8 @@ def scan_unit(unit):
         'log_file': log_file,
         'http_port': http_port,
         'domain': domain,
+        'domain_candidates': domain_candidates,
+        'domain_ambiguous': domain_ambiguous,
         'pub_port': pub_port,
         'nginx_file': nginx_file,
         'addons_path': addons_path,

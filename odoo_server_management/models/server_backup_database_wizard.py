@@ -5,7 +5,7 @@ import json
 import re
 import yaml
 
-from .stage import GROUP_USER, GROUP_OPERATOR
+from .stage import GROUP_USER
 
 SAFE_NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
 

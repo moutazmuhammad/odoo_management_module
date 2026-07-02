@@ -8,7 +8,6 @@ access_view_conf_wizard_user,server.view.conf.wizard.user,model_server_view_conf
 access_pull_wizard_user,server.pull.wizard.user,model_server_pull_wizard,odoo_server_management.group_user,1,1,1,0
 access_upgrade_wizard_user,server.upgrade.module.wizard.user,model_server_upgrade_module_wizard,odoo_server_management.group_user,1,1,1,0
 access_backup_wizard_user,server.backup.database.wizard.user,model_server_backup_database_wizard,odoo_server_management.group_user,1,1,1,0
-access_host_operator,server.host.operator,model_server_host,odoo_server_management.group_operator,1,1,1,0
 access_host_admin,server.host.admin,model_server_host,odoo_server_management.group_admin,1,1,1,1
 access_stage_admin,server.stage.admin,model_server_stage,odoo_server_management.group_admin,1,1,1,1
 access_stage_branch_admin,server.stage.branch.admin,model_server_stage_branch,odoo_server_management.group_admin,1,1,1,1

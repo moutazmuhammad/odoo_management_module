@@ -12,7 +12,7 @@ from psycopg2 import errorcodes
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError, AccessError, ValidationError
 
-from .stage import GROUP_OPERATOR, GROUP_DEVOPS, GROUP_ADMIN
+from .stage import GROUP_DEVOPS, GROUP_ADMIN
 
 _logger = logging.getLogger(__name__)
 
@@ -42,13 +42,12 @@ class ServerHost(models.Model):
         default=lambda s: s.env['server.stage']._default_ssh_port(),
     )
     notes = fields.Text(string='Notes')
-    # When set, this server and all its instances/details are visible ONLY to
-    # DevOps and Administrators (enforced by record rules). Operational users
-    # cannot see or access it at all.
+    # When set, this server's instances are hidden from plain Developers
+    # (enforced by record rules); servers are DevOps/Admin-only regardless.
     devops_only = fields.Boolean(
         string='DevOps Only', groups=GROUP_DEVOPS, default=False,
-        help="Restrict this server (and its instances) to DevOps and "
-             "Administrators only — Operational users cannot see it.")
+        help="Hide this server's instances from plain Developers (Servers "
+             "themselves are already DevOps/Administrator only).")
     # Admin-only: enable the daily auto-stop job for this server. Off by default.
     auto_stop_enabled = fields.Boolean(
         string='Stop Instances', groups=GROUP_DEVOPS, default=False,
@@ -707,7 +706,7 @@ class ServerHost(models.Model):
         server then backs itself up (presign-on-demand) with NO secret stored
         locally — the manager identifies the agent by its source IP — and the
         manager's daily cron skips this host afterwards."""
-        self.env['server.stage']._check_access(GROUP_OPERATOR)
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         self._require_key()
         Storage = self.env['server.backup.storage']
@@ -940,7 +939,7 @@ class ServerHost(models.Model):
         error. So the click returns immediately and the work runs in a worker thread
         that commits its DB sync and pushes the result (counts, or the error) to the
         user as a bus toast. The outcome is also persisted on the host (op_* fields)."""
-        self.env['server.stage']._check_access(GROUP_OPERATOR)
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         self._require_key()
         self.sudo().write({'op_label': _('Discover server'), 'op_state': 'running',
@@ -1053,6 +1052,26 @@ class ServerHost(models.Model):
             _logger.warning("Failed to parse discovery payload: %s", exc)
             return []
 
+    @staticmethod
+    def _build_review_reason(missing, domain_ambiguous, chosen_domain, candidates):
+        """Human-readable explanation of why discovery flagged an instance for
+        manual review (shown on the stage). Empty string when nothing is wrong."""
+        reasons = []
+        if missing:
+            reasons.append(_(
+                "Some values could not be auto-detected (conf file, log file, "
+                "odoo user or odoo-bin) — fill them in before running actions."))
+        if domain_ambiguous:
+            others = [d for d in candidates if d and d != chosen_domain]
+            reasons.append(_(
+                "This instance's port is served by multiple nginx domains: %(all)s. "
+                "Discovery kept \"%(chosen)s\" — confirm it is the correct one "
+                "(edit the Stage Name if it should be another).") % {
+                    'all': ", ".join(candidates),
+                    'chosen': chosen_domain or _("(none)"),
+                } + (_(" Other candidate(s): %s.") % ", ".join(others) if others else ""))
+        return "\n".join(reasons)
+
     def _sync_instances(self, instances):
         """Create/update one server.stage per detected service, and prune stages
         for services that no longer exist on the server."""
@@ -1071,6 +1090,13 @@ class ServerHost(models.Model):
                 inst.get('conf_file'), inst.get('log_file'),
                 inst.get('odoo_user'), odoo_bin,
             ])
+            # Ambiguous domain: the instance's port is fronted by MORE THAN ONE
+            # nginx server_name (e.g. an apex domain and a subdomain both proxy to
+            # the same Odoo). Discovery picks one deterministically, but which is
+            # "correct" is the operator's call — flag it for manual review with the
+            # full candidate list rather than silently choosing.
+            domain_candidates = [d for d in (inst.get('domain_candidates') or []) if d]
+            domain_ambiguous = bool(inst.get('domain_ambiguous')) and len(domain_candidates) > 1
             # Stage name uses the SAME source as the backup path (nginx domain, else
             # <ip>:<port> where port = nginx listen port (domainless vhost) or the
             # conf http_port). Only difference vs the bucket path: the name keeps
@@ -1096,7 +1122,9 @@ class ServerHost(models.Model):
                 'upgrade_module_path': upgrade_path,
                 'odoo_user': inst.get('odoo_user') or '',
                 'http_port': int(inst['http_port']) if str(inst.get('http_port') or '').isdigit() else 0,
-                'needs_review': missing,
+                'needs_review': bool(missing or domain_ambiguous),
+                'review_reason': self._build_review_reason(
+                    missing, domain_ambiguous, domain, domain_candidates),
             }
             # Auto-detected master password (plaintext from the conf). Only set it
             # when found, so a manual entry is never wiped by a later discovery.
@@ -1110,11 +1138,18 @@ class ServerHost(models.Model):
                 ('service_name', '=', service_name),
             ], limit=1)
             if existing:
-                existing.write(vals)
+                # Preserve hand-edited fields: discovery must not overwrite any
+                # field the user corrected by hand (tracked in overridden_fields),
+                # e.g. a real domain the nginx file doesn't carry. from_discovery
+                # tells stage.write() this is an automated sync, so it does NOT
+                # re-mark the remaining fields as overrides.
+                protected = set(filter(None, (existing.overridden_fields or '').split(',')))
+                write_vals = {k: v for k, v in vals.items() if k not in protected}
+                existing.with_context(from_discovery=True).write(write_vals)
                 stage = existing
                 updated += 1
             else:
-                stage = Stage.create(vals)
+                stage = Stage.with_context(from_discovery=True).create(vals)
                 created += 1
             seen_services.add(service_name)
             self._sync_repos(stage, inst.get('repos') or [])

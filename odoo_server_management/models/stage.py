@@ -23,10 +23,9 @@ _logger = logging.getLogger(__name__)
 SECRET_KEY_ENV = 'ODOO_SERVER_MGMT_KEY'
 
 # Role groups used for in-method authorization (defense in depth behind sudo()).
-# Hierarchy (each implies the previous): User -> Operator -> Administrator.
+# Hierarchy (each implies the previous): User -> DevOps -> Administrator.
 GROUP_USER = 'odoo_server_management.group_user'          # Developer: act on stages
-GROUP_OPERATOR = 'odoo_server_management.group_operator'  # Operational: + servers/discover/agent
-GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: everything except settings
+GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: servers/discover/agent + everything except settings
 GROUP_ADMIN = 'odoo_server_management.group_admin'        # Administrator: + General Settings
 
 # Keys whose values must never be written to ir.logging / process output.
@@ -83,6 +82,19 @@ class Stage(models.Model):
     _description = 'Server Stage'
     _order = 'name'
 
+    # Discovery-managed fields a user is allowed to correct by hand. Once one of
+    # these is edited manually, discovery must NOT overwrite it on the next scan —
+    # e.g. a real domain that the server's nginx file doesn't contain (it points at
+    # the bare IP), or a fixed conf path. `service_name` and `host_id` are excluded
+    # on purpose: they are the stage's identity / match key, so discovery keeps them
+    # in sync (they are how a service is matched, created and pruned).
+    DISCOVERY_MANAGED_FIELDS = frozenset({
+        'name', 'odoo_version', 'odoo_bin', 'python_bin', 'conf_file', 'nginx_file',
+        'log_file_path', 'upgrade_module_path', 'odoo_user', 'http_port',
+        'needs_review', 'review_reason', 'admin_password',
+        'available_modules', 'available_odoo_modules',
+    })
+
     # ===========================
     # Fields
     # ===========================
@@ -96,7 +108,7 @@ class Stage(models.Model):
     @api.depends('client_stage')
     def _compute_can_act(self):
         is_operator = (self.env.su
-                       or self.env.user.has_group('odoo_server_management.group_operator'))
+                       or self.env.user.has_group('odoo_server_management.group_devops'))
         for rec in self:
             rec.can_act = (not rec.client_stage) or is_operator
 
@@ -111,6 +123,10 @@ class Stage(models.Model):
     )
     # Connection info is read from the host (host_id.ip / host_id.ssh_port) plus
     # the global SSH user/key — it is no longer duplicated on the stage.
+    # Mirror of the host's backup category ('odex' / 'erp') so views can gate
+    # controls per server type — e.g. "Sync Domain → Nginx" is Odex-only.
+    host_backup_category = fields.Selection(
+        related='host_id.backup_category', string='Host Category', readonly=True)
 
     repo_branch_paths = fields.One2many(
         'server.stage.repo.branch.path',
@@ -138,6 +154,23 @@ class Stage(models.Model):
         string='Needs Review', default=False,
         help="Set when auto-discovery could not determine every value.",
     )
+    # Why discovery flagged this instance — e.g. incomplete detection, or a port
+    # fronted by several nginx domains (ambiguous — a human must pick the right one).
+    review_reason = fields.Text(
+        string='Review Reason', readonly=True,
+        help="Explanation of why discovery flagged this instance for manual "
+             "review (incomplete detection, or an ambiguous nginx domain).",
+    )
+    # Comma-separated list of discovery-managed fields the user has hand-edited.
+    # Discovery leaves these fields untouched on re-scan so manual corrections
+    # stick (see DISCOVERY_MANAGED_FIELDS and _sync_instances). copy=False so a
+    # duplicated stage starts fresh (fully auto-synced).
+    overridden_fields = fields.Char(
+        string='Manually Overridden Fields', readonly=True, copy=False,
+        help="Fields you changed by hand. Discovery will not overwrite them on "
+             "the next scan. Use 'Resume Auto-Sync' to let discovery manage them "
+             "again.",
+    )
 
     odoo_user = fields.Char(string='Odoo User', groups=GROUP_DEVOPS)
     # Stored encrypted at rest; never exposed directly in views. The plaintext
@@ -159,6 +192,41 @@ class Stage(models.Model):
         Stage = self.env['server.stage']
         for rec in self:
             rec.admin_password_enc = Stage._encrypt_secret(rec.admin_password)
+
+    def write(self, vals):
+        """Track hand-edits so discovery never clobbers them.
+
+        When a user changes any DISCOVERY_MANAGED_FIELDS value (i.e. NOT a write
+        coming from discovery, which sets context `from_discovery`), the changed
+        field names are appended to `overridden_fields`. `_sync_instances` then
+        skips those fields on the next scan, so a manual correction — e.g. a real
+        domain the nginx file doesn't carry — persists across discoveries."""
+        if vals and not self.env.context.get('from_discovery'):
+            touched = self.DISCOVERY_MANAGED_FIELDS.intersection(vals)
+            if touched:
+                for rec in self:
+                    have = set(filter(None, (rec.overridden_fields or '').split(',')))
+                    merged = have | touched
+                    if merged != have:
+                        # Bypass this override (from_discovery) so tracking the
+                        # override list never re-enters or marks itself.
+                        super(Stage, rec.with_context(from_discovery=True)).write(
+                            {'overridden_fields': ','.join(sorted(merged))})
+        return super().write(vals)
+
+    def action_resume_discovery_sync(self):
+        """Clear the manual-override lock so the NEXT discovery refreshes every
+        field on this instance from the server again."""
+        self.ensure_one()
+        self._check_access(GROUP_DEVOPS)
+        if not self.overridden_fields:
+            return self.env['server.stage']._notify(
+                _("Nothing to resume — no fields are manually overridden on this "
+                  "instance."))
+        self.with_context(from_discovery=True).write({'overridden_fields': False})
+        return self.env['server.stage']._notify(
+            _("✅ Auto-sync resumed. The next Discover will refresh this instance "
+              "from the server."))
 
     service_status = fields.Boolean(string='Service Status', default=False, readonly=True)
     # Admin-only: whether the daily auto-stop job may stop this instance (only
@@ -445,9 +513,9 @@ class Stage(models.Model):
 
     def _check_action_access(self):
         """Gate an operational action: a **Client Server** instance may only be
-        acted on by Operators/Admins; a normal instance by any User."""
+        acted on by DevOps/Admins; a normal instance by any User."""
         self.ensure_one()
-        self._check_access(GROUP_OPERATOR if self.client_stage else GROUP_USER)
+        self._check_access(GROUP_DEVOPS if self.client_stage else GROUP_USER)
 
     # ===========================
     # Helpers
@@ -553,6 +621,43 @@ class Stage(models.Model):
             return True
         return self.sudo()._run_bg(_('Check status'),
                                    self._status_check_work(), reload=True)
+
+    def action_sync_domain_to_nginx(self):
+        """Push the manually-entered domain (Stage Name) into this instance's
+        nginx `server_name`, so the next Discover reads the corrected domain and
+        keeps THIS same stage instead of relabelling it from a wrong/IP
+        server_name. Backs up the vhost, validates with `nginx -t`, reloads."""
+        self.ensure_one()
+        self._check_access(GROUP_DEVOPS)
+        if not self.host_id:
+            raise UserError(_("This instance is not linked to a server."))
+        # Odex-only control: the domain→nginx rewrite is only offered for Odex
+        # servers (the button is hidden elsewhere; guard the action too).
+        if self.host_id.backup_category != 'odex':
+            raise UserError(_(
+                "Sync Domain → Nginx is only available on Odex servers."))
+        if not self.nginx_file:
+            raise UserError(_(
+                "No nginx file was detected for this instance, so there is "
+                "nothing to update. Run Discover first."))
+        domain = (self.name or '').strip()
+        # Must be a bare FQDN — not empty, not an IP, not IP:port, not a URL.
+        if not re.match(r'^(?=.{1,253}$)([A-Za-z0-9](-?[A-Za-z0-9])*\.)+[A-Za-z]{2,}$',
+                        domain):
+            raise UserError(_(
+                "Enter a valid domain in the Stage Name field first — e.g. "
+                "app.example.com — with no http://, port or path. Current "
+                "value: %s") % (domain or '(empty)'))
+        result = self.host_id._run(
+            'set_nginx_domain.yml',
+            extra_vars={'nginx_file': self.nginx_file, 'domain': domain,
+                        'discover_become': True})
+        if not result.get('success'):
+            raise UserError(_("Could not update nginx server_name:\n\n%s")
+                            % (result.get('output') or '')[-1200:])
+        return self.env['server.stage']._notify(
+            _("✅ nginx server_name set to %s and reloaded. Re-run Discover to "
+              "confirm it maps to this instance.") % domain)
 
     # ===========================
     # Background action runner (non-blocking actions with async result toasts)
