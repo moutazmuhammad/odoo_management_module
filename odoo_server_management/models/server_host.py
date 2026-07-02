@@ -19,6 +19,9 @@ _logger = logging.getLogger(__name__)
 # IPv4 or a hostname that must start with an alphanumeric (never a dash — a
 # leading '-' could be interpreted by ssh as an option = argument injection).
 IP_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$|^[A-Za-z0-9][A-Za-z0-9.\-]*$')
+# A routable fully-qualified domain (at least one dot, valid labels, TLD of 2+
+# letters). Used to validate the domain discovery derives a stage name from.
+FQDN_RE = re.compile(r'^(?=.{1,253}$)([A-Za-z0-9](-?[A-Za-z0-9])*\.)+[A-Za-z]{2,}$')
 DISCOVERY_MARKER = 'ODOO_DISCOVERY_JSON:'
 
 
@@ -1065,7 +1068,33 @@ class ServerHost(models.Model):
             return []
 
     @staticmethod
-    def _build_review_reason(missing, domain_ambiguous, chosen_domain, candidates):
+    def _invalid_name_reason(domain, ip, pub_port):
+        """Validate the source discovery names a stage from and return a
+        human-readable reason when it is NOT usable (empty string when it is).
+
+        The stage name is the nginx domain, else `<ip>:<port>`. Flag it when the
+        domain is not a routable FQDN, when the IP/public port is missing or out
+        of range, or when neither could be determined at all — so the operator
+        can correct the Stage Name instead of silently trusting a bad value."""
+        if domain:
+            if not FQDN_RE.match(domain):
+                return _("The detected domain \"%s\" is not a valid domain name — "
+                         "correct the Stage Name.") % domain
+            return ''
+        if pub_port:
+            if not (ip and IP_RE.match(ip.strip())):
+                return _("The server IP \"%s\" is not valid, so the "
+                         "IP:port stage name is unreliable.") % (ip or _("(none)"))
+            if not (pub_port.isdigit() and 1 <= int(pub_port) <= 65535):
+                return _("The detected public port \"%s\" is not a valid port "
+                         "(1-65535).") % pub_port
+            return ''
+        return _("Discovery could not determine a domain or public port for this "
+                 "instance — set a valid Stage Name before running actions.")
+
+    @staticmethod
+    def _build_review_reason(missing, domain_ambiguous, chosen_domain, candidates,
+                             name_reason=''):
         """Human-readable explanation of why discovery flagged an instance for
         manual review (shown on the stage). Empty string when nothing is wrong."""
         reasons = []
@@ -1073,6 +1102,8 @@ class ServerHost(models.Model):
             reasons.append(_(
                 "Some values could not be auto-detected (conf file, log file, "
                 "odoo user or odoo-bin) — fill them in before running actions."))
+        if name_reason:
+            reasons.append(name_reason)
         if domain_ambiguous:
             others = [d for d in candidates if d and d != chosen_domain]
             reasons.append(_(
@@ -1160,6 +1191,9 @@ class ServerHost(models.Model):
             if domain[:4].lower() == 'www.':
                 domain = domain[4:]
             pub_port = str(inst.get('pub_port') or inst.get('http_port') or '').strip()
+            # Flag the stage when the name source is not valid — a malformed
+            # domain, a bad/missing IP or port, or neither could be determined.
+            name_reason = self._invalid_name_reason(domain, self.ip, pub_port)
             if domain:
                 stage_name = domain
             elif pub_port:
@@ -1183,9 +1217,9 @@ class ServerHost(models.Model):
                 'upgrade_module_path': upgrade_path,
                 'odoo_user': inst.get('odoo_user') or '',
                 'http_port': int(inst['http_port']) if str(inst.get('http_port') or '').isdigit() else 0,
-                'needs_review': bool(missing or domain_ambiguous),
+                'needs_review': bool(missing or domain_ambiguous or name_reason),
                 'review_reason': self._build_review_reason(
-                    missing, domain_ambiguous, domain, domain_candidates),
+                    missing, domain_ambiguous, domain, domain_candidates, name_reason),
             }
             # Auto-detected master password (plaintext from the conf). Only set it
             # when found, so a manual entry is never wiped by a later discovery.
