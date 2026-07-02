@@ -24,7 +24,8 @@ FMT = "%H%x1f%h%x1f%s%x1f%cI%x1f%an"
 
 def sh(cmd):
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
         return r.stdout.strip() if r.returncode == 0 else ''
     except Exception:
         return ''
