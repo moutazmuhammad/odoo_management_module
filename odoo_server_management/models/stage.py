@@ -232,7 +232,7 @@ class Stage(models.Model):
     # Admin-only: whether the daily auto-stop job may stop this instance (only
     # has effect when its host's "Stop Instances" is enabled).
     auto_stop = fields.Boolean(
-        string='Auto-Stop', default=True, groups=GROUP_DEVOPS,
+        string='Auto-Stop', default=False, groups=GROUP_DEVOPS,
         help="If the server's 'Stop Instances' is on, stop this instance once "
              "its service has been running longer than the configured days.",
     )
