@@ -1153,6 +1153,12 @@ class ServerHost(models.Model):
             # conf http_port). Only difference vs the bucket path: the name keeps
             # ip:port while the path uses ip-port.
             domain = (inst.get('domain') or '').strip()
+            # A leading "www." is a routine alias of the apex domain, not a distinct
+            # instance — name the stage by the apex (www.alowaidah.org.sa ->
+            # alowaidah.org.sa) so it reads cleanly and stays consistent with the
+            # backup path derived from the name.
+            if domain[:4].lower() == 'www.':
+                domain = domain[4:]
             pub_port = str(inst.get('pub_port') or inst.get('http_port') or '').strip()
             if domain:
                 stage_name = domain
