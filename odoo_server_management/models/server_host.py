@@ -438,7 +438,9 @@ class ServerHost(models.Model):
     # Bump whenever the deployed agent code (files/backup_agent.py or
     # files/smart_backup.py) changes so the ensure-agents cron redeploys live
     # hosts. v2: agent survives the manager's http->https 301 (kept POST body).
-    _AGENT_VERSION = '2'
+    # v3: smart_backup.py made Python 3.6-compatible (dropped 3.7+ subprocess
+    # capture_output=/text= kwargs) so detection/backup work on older hosts.
+    _AGENT_VERSION = '3'
 
     @staticmethod
     def _backup_norm(value):
