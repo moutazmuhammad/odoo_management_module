@@ -401,8 +401,14 @@ class ServerHost(models.Model):
             v = statuses.get(st.service_name)
             if v in ('active', 'activating'):
                 st.odoo_status = 'running'
-            elif v:
+            elif v and v != 'unknown':
+                # inactive / failed / deactivating -> genuinely stopped.
                 st.odoo_status = 'stopped'
+            elif v == 'unknown':
+                # The probe itself could not determine the state (e.g. it errored
+                # on the host). Do NOT assert 'stopped' — that made a running
+                # service look down. Leave it 'unknown' instead.
+                st.odoo_status = 'unknown'
             st.last_status_check = now
 
     # ------------------------------------------------------------------

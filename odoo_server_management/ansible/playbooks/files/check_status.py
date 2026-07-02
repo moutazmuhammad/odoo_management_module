@@ -17,8 +17,13 @@ for s in services:
     if not s:
         continue
     try:
+        # NOTE: capture_output= and text= are Python 3.7+. Target hosts may run
+        # Python 3.6 (e.g. Ubuntu 18.04), where those kwargs raise TypeError, so
+        # every probe would fall to 'unknown' and a RUNNING service would be shown
+        # as stopped. Use the 3.6-compatible stdout/stderr=PIPE + universal_newlines.
         r = subprocess.run(['systemctl', 'is-active', s],
-                           capture_output=True, text=True, timeout=10)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=10)
         out[s] = (r.stdout or '').strip() or 'unknown'
     except Exception:
         out[s] = 'unknown'
