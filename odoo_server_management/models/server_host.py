@@ -491,8 +491,12 @@ class ServerHost(models.Model):
         targets, seen = [], set()
         for st in self.stage_ids:
             name = (st.name or '').strip()
-            if ':' in name:                       # "<ip>:<port>" form
-                domain, port = '', name.rsplit(':', 1)[1]
+            # "<ip>:<port>" form — possibly with a disambiguating "(service)"
+            # suffix on a domainless duplicate, so match the numeric port rather
+            # than naively splitting on the last colon.
+            m = re.search(r':(\d+)', name)
+            if m:
+                domain, port = '', m.group(1)
             else:                                 # nginx domain (or fallback name)
                 domain, port = name, ''
             for db in (st.available_databases or '').splitlines():
@@ -1080,6 +1084,41 @@ class ServerHost(models.Model):
                 } + (_(" Other candidate(s): %s.") % ", ".join(others) if others else ""))
         return "\n".join(reasons)
 
+    def _unique_stage_name(self, base, service_name, used_names):
+        """Return a globally-unique stage name derived from `base`.
+
+        The `server.stage.name` column is globally unique, but discovery names a
+        domainless instance `<ip>:<port>` and two services on one host can share a
+        port — e.g. both are stopped, or neither sets `http_port` so both fall
+        back to Odoo's 8069 default — producing the SAME name. A bare duplicate
+        used to abort the entire discovery with a unique-constraint violation.
+        Disambiguate deterministically by the service name (unique per host):
+        `<ip>:<port> (service)`. `used_names` guards against clashes with names
+        assigned earlier in THIS run (not yet committed, so invisible to a search);
+        the DB search guards against a name already held by a DIFFERENT
+        host/service pair. A stage keeps its name across re-scans because the same
+        (host, service) is excluded from the clash check."""
+        Stage = self.env['server.stage'].sudo()
+
+        def taken(candidate):
+            if candidate in used_names:
+                return True
+            return bool(Stage.search([
+                ('name', '=', candidate),
+                '|', ('host_id', '!=', self.id),
+                ('service_name', '!=', service_name),
+            ], limit=1))
+
+        if not taken(base):
+            return base
+        cand = '%s (%s)' % (base, service_name)
+        if not taken(cand):
+            return cand
+        i = 2
+        while taken('%s (%s #%s)' % (base, service_name, i)):
+            i += 1
+        return '%s (%s #%s)' % (base, service_name, i)
+
     def _sync_instances(self, instances):
         """Create/update one server.stage per detected service, and prune stages
         for services that no longer exist on the server."""
@@ -1087,10 +1126,14 @@ class ServerHost(models.Model):
         Stage = self.env['server.stage'].sudo()
         created = updated = 0
         seen_services = set()
+        used_names = set()   # stage names assigned in THIS run — kept unique
         for inst in instances:
             service_name = (inst.get('service_name') or '').strip()
             if not service_name:
                 continue
+            # A detected service must never be pruned, even if its per-instance
+            # sync below fails on a transient error — record it up front.
+            seen_services.add(service_name)
             odoo_bin = inst.get('odoo_bin') or ''
             python_bin = inst.get('python_bin') or ''
             upgrade_path = (f"{python_bin} {odoo_bin}".strip()) if odoo_bin else ''
@@ -1117,6 +1160,10 @@ class ServerHost(models.Model):
                 stage_name = f"{self.ip}:{pub_port}"
             else:
                 stage_name = f"{self.name} / {service_name}"
+            # Guarantee a globally-unique name so two domainless services sharing a
+            # port (or any other clash) can never abort the whole discovery.
+            stage_name = self._unique_stage_name(stage_name, service_name, used_names)
+            used_names.add(stage_name)
             vals = {
                 'host_id': self.id,
                 'name': stage_name,
@@ -1141,26 +1188,37 @@ class ServerHost(models.Model):
                 vals['admin_password'] = admin_pw
             vals['available_modules'] = "\n".join(inst.get('modules') or [])
             vals['available_odoo_modules'] = "\n".join(inst.get('odoo_modules') or [])
-            existing = Stage.search([
-                ('host_id', '=', self.id),
-                ('service_name', '=', service_name),
-            ], limit=1)
-            if existing:
-                # Preserve hand-edited fields: discovery must not overwrite any
-                # field the user corrected by hand (tracked in overridden_fields),
-                # e.g. a real domain the nginx file doesn't carry. from_discovery
-                # tells stage.write() this is an automated sync, so it does NOT
-                # re-mark the remaining fields as overrides.
-                protected = set(filter(None, (existing.overridden_fields or '').split(',')))
-                write_vals = {k: v for k, v in vals.items() if k not in protected}
-                existing.with_context(from_discovery=True).write(write_vals)
-                stage = existing
-                updated += 1
-            else:
-                stage = Stage.with_context(from_discovery=True).create(vals)
-                created += 1
-            seen_services.add(service_name)
-            self._sync_repos(stage, inst.get('repos') or [])
+            # Isolate each instance in a savepoint: one bad row (an unforeseen
+            # constraint, a residual name clash, a repo-sync hiccup) is skipped
+            # with a logged warning instead of rolling back — and thereby losing —
+            # every other instance discovered on this host.
+            try:
+                with self.env.cr.savepoint():
+                    existing = Stage.search([
+                        ('host_id', '=', self.id),
+                        ('service_name', '=', service_name),
+                    ], limit=1)
+                    if existing:
+                        # Preserve hand-edited fields: discovery must not overwrite
+                        # any field the user corrected by hand (tracked in
+                        # overridden_fields), e.g. a real domain the nginx file
+                        # doesn't carry. from_discovery tells stage.write() this is
+                        # an automated sync, so it does NOT re-mark the remaining
+                        # fields as overrides.
+                        protected = set(filter(None, (existing.overridden_fields or '').split(',')))
+                        write_vals = {k: v for k, v in vals.items() if k not in protected}
+                        existing.with_context(from_discovery=True).write(write_vals)
+                        stage = existing
+                        updated += 1
+                    else:
+                        stage = Stage.with_context(from_discovery=True).create(vals)
+                        created += 1
+                    self._sync_repos(stage, inst.get('repos') or [])
+            except Exception:  # noqa: BLE001 — never let one instance abort the scan
+                _logger.exception(
+                    "Discovery: could not sync instance %s on host %s; skipping it.",
+                    service_name, self.name)
+                continue
 
         # Prune: a service that is no longer on the server -> remove its stage
         # (and, via ondelete=cascade, its repo-path links). Only runs when the
