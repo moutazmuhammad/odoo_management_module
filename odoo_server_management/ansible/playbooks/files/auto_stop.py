@@ -16,7 +16,8 @@ import subprocess
 
 def sh(cmd):
     try:
-        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        return subprocess.run(cmd, shell=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
     except Exception:
         return None
 

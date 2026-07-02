@@ -69,7 +69,8 @@ def list_for(conf, odoo_user):
     out = ''
     for a in attempts:
         try:
-            r = subprocess.run(a, shell=True, capture_output=True, text=True, timeout=12)
+            r = subprocess.run(a, shell=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, universal_newlines=True, timeout=12)
         except Exception:
             continue
         if r.returncode == 0 and r.stdout.strip():

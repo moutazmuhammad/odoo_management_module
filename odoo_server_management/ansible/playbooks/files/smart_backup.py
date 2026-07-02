@@ -49,7 +49,8 @@ CHUNK = 8 * 1024 * 1024
 def _pg_prefix():
     """Run local DB tools as the postgres superuser when possible (peer auth)."""
     try:
-        r = subprocess.run(['sudo', '-n', '-u', 'postgres', 'true'], capture_output=True)
+        r = subprocess.run(['sudo', '-n', '-u', 'postgres', 'true'],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if r.returncode == 0:
             return ['sudo', '-n', '-u', 'postgres']
     except Exception:
@@ -61,7 +62,7 @@ PG = _pg_prefix()
 
 
 def _run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, **kw)
 
 
 def _scan_pg_dumps():
@@ -72,7 +73,7 @@ def _scan_pg_dumps():
         if m:
             bins[int(m.group(1))] = p
     try:
-        r = subprocess.run(['pg_dump', '--version'], capture_output=True, text=True)
+        r = subprocess.run(['pg_dump', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         mm = re.search(r'(\d+)\.\d+', r.stdout or '')
         if mm:
             bins.setdefault(int(mm.group(1)), 'pg_dump')
@@ -89,7 +90,7 @@ def _install_pg_client(major):
                 ['sudo', '-n', 'apt-get', 'install', '-y', '-qq',
                  'postgresql-client-%d' % major]):
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=600)
         except Exception:
             return
 
@@ -162,7 +163,7 @@ class Conn:
 
     def psql_scalar(self, db, sql):
         cmd, env = self._cmd('psql', db, ['-tAc', sql])
-        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, env=env)
         return r.stdout.strip() if r.returncode == 0 else ''
 
     def server_major(self, db):
@@ -207,7 +208,7 @@ class Conn:
         cands = [None, 'postgres'] if self.local else self._maint_candidates(hints)
         for cand in cands:
             cmd, env = self._cmd('psql', cand, ['-tAc', sql])
-            r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, env=env)
             if r.returncode == 0:
                 return [d.strip() for d in r.stdout.splitlines() if d.strip()]
         return []
@@ -237,7 +238,7 @@ def _parse_conf(path):
 def _conf_files():
     confs = set()
     try:
-        ps = subprocess.run(['ps', '-eo', 'args'], capture_output=True, text=True).stdout
+        ps = subprocess.run(['ps', '-eo', 'args'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True).stdout
     except Exception:
         ps = ''
     for line in ps.splitlines():
@@ -427,7 +428,7 @@ def parse_nginx():
 def _data_dir_candidates():
     dirs, confs = set(), set()
     try:
-        ps = subprocess.run(['ps', '-eo', 'args'], capture_output=True, text=True).stdout
+        ps = subprocess.run(['ps', '-eo', 'args'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True).stdout
     except Exception:
         ps = ''
     for line in ps.splitlines():
@@ -457,7 +458,7 @@ def find_filestore(db):
         r = subprocess.run(
             ['find', '/opt', '/home', '/var/lib', '-maxdepth', '7', '-type', 'd',
              '-path', '*/filestore/' + db, '-print', '-quit'],
-            capture_output=True, text=True, timeout=90)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=90)
         for hit in r.stdout.splitlines():
             if hit and os.path.isdir(hit):
                 return hit
@@ -606,7 +607,7 @@ def build_manifest(conn, db):
     cmd, env = conn._cmd('psql', db, ['-tAF', '\t', '-c',
                          "SELECT name, latest_version FROM ir_module_module "
                          "WHERE state='installed'"])
-    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, env=env)
     for line in r.stdout.splitlines():
         if '\t' in line:
             n, v = line.split('\t', 1)
@@ -746,7 +747,7 @@ def _curl_put(url, path, length=None, offset=0):
                 '-H %s --data-binary @- %s'
                 % (shlex.quote(path), offset, length,
                    shlex.quote('Content-Length: %d' % length), shlex.quote(url)))
-        r = subprocess.run(pipe, shell=True, capture_output=True, text=True)
+        r = subprocess.run(pipe, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         head = r.stdout
     if r.returncode != 0:
         raise RuntimeError('upload failed (%s): %s'
