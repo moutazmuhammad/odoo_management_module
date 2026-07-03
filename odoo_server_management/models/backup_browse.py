@@ -28,7 +28,10 @@ class BackupFile(models.TransientModel):
     db = fields.Char(string='Database', readonly=True)
     filename = fields.Char(string='File', readonly=True)
     key = fields.Char(string='Object Key', readonly=True)
-    size = fields.Integer(string='Bytes', readonly=True)
+    # Float (not Integer): backups routinely exceed 2 GB and a 32-bit int4 column
+    # overflows with 'integer out of range', which crashed the whole listing so
+    # NO backups showed. float8 is exact well past any realistic backup size.
+    size = fields.Float(string='Bytes', readonly=True)
     size_human = fields.Char(string='Size', compute='_compute_size_human')
     last_modified = fields.Datetime(string='Created', readonly=True)
     kind = fields.Selection([('daily', 'Daily'), ('manual', 'Manual')],

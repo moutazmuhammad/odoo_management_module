@@ -142,11 +142,39 @@ class Conn:
     def key(self):
         return 'local' if self.local else '%s:%s:%s' % (self.host, self.port, self.user)
 
+    def _local_port(self):
+        """Cluster port for a LOCAL (peer/socket) connection.
+
+        Debian/Ubuntu ship `psql`/`pg_dump` as pg_wrapper shims that auto-pick
+        the running cluster's port. But we invoke pg_dump by its ABSOLUTE
+        versioned path (to out-version the server, see `_pg_dump_bin`), which
+        BYPASSES the wrapper and falls back to the compiled default 5432 — so on
+        a cluster listening elsewhere (e.g. Odoo's `db_port = 6381`) it fails
+        with 'could not connect ... .s.PGSQL.5432: No such file or directory'.
+        Passing an explicit -p to every local tool keeps psql and pg_dump on the
+        same cluster.
+
+        The port is taken from the Odoo conf's `db_port` (carried on this Conn by
+        `_sources`). Only when NO conf specifies one do we auto-detect the single
+        running cluster from its unix socket."""
+        if self.port:
+            return self.port
+        ports = set()
+        for d in ('/var/run/postgresql', '/run/postgresql', '/tmp'):
+            for s in glob.glob(os.path.join(d, '.s.PGSQL.*')):
+                m = re.search(r'\.s\.PGSQL\.(\d+)$', s)
+                if m:
+                    ports.add(m.group(1))
+        return ports.pop() if len(ports) == 1 else ''
+
     def _cmd(self, tool, db=None, extra=None):
         env = dict(os.environ)
         env['LC_ALL'] = 'C'          # avoid locale warnings corrupting stdout
         if self.local:
             cmd = PG + [tool]
+            p = self._local_port()
+            if p:
+                cmd += ['-p', p]
         else:
             cmd = [tool, '-h', self.host]
             if self.port:
@@ -181,6 +209,9 @@ class Conn:
         env['LC_ALL'] = 'C'
         if self.local:
             cmd = PG + [binpath]
+            p = self._local_port()
+            if p:
+                cmd += ['-p', p]
         else:
             cmd = [binpath, '-h', self.host]
             if self.port:
@@ -265,6 +296,12 @@ def _sources():
                     cfg.get('db_user', ''), cfg.get('db_password', ''))
         s = srcs.setdefault(conn.key(), {'conn': conn, 'confs': []})
         s['confs'].append(cfg)
+        # All local confs collapse under one key ('local'), but they don't all
+        # write out db_port (e.g. odoo-backup.conf has none while the real
+        # instances say db_port = 6381). Keep a conn that CARRIES the explicit
+        # db_port so pg_dump targets the right cluster instead of the 5432 default.
+        if not s['conn'].port and conn.port:
+            s['conn'] = conn
     local = Conn()
     srcs.setdefault(local.key(), {'conn': local, 'confs': []})
     return srcs
@@ -588,6 +625,14 @@ def _resolve_conn(db):
             return s['conn']
     for s in ordered:
         if _db_connectable(s['conn'], db):
+            return s['conn']
+    # Nothing answered the probe (e.g. a transient hiccup under load, or the DB
+    # server briefly hit its connection cap). Don't fall back to a bare Conn() —
+    # its port is empty, so the ABSOLUTE-path pg_dump would default to 5432 and
+    # fail with a misleading '.s.PGSQL.5432' socket error. Prefer a source that
+    # carries the conf's db_port so a retry still targets the RIGHT cluster.
+    for s in ordered:
+        if s['conn'].local and s['conn'].port:
             return s['conn']
     return Conn()
 
