@@ -4,7 +4,12 @@
 # and is run via the `script` module (no Ansible quote-parsing of the source).
 - hosts: all
   gather_facts: no
-  become: no
+  # Run as root: the per-instance Odoo .conf files are often 0640/0660 root|odoo
+  # owned, so an unprivileged SSH user can't read db_password (→ every DB lookup
+  # fails and the host silently backs up NOTHING). As root we can read any conf
+  # AND fall back to the `postgres` superuser (peer auth), so detection no longer
+  # depends on conf permissions or a password being present.
+  become: yes
   tasks:
     - name: List databases for the host's instances
       script: files/list_databases.py {{ spec | quote }}

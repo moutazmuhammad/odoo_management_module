@@ -443,7 +443,11 @@ class ServerHost(models.Model):
     # hosts. v2: agent survives the manager's http->https 301 (kept POST body).
     # v3: smart_backup.py made Python 3.6-compatible (dropped 3.7+ subprocess
     # capture_output=/text= kwargs) so detection/backup work on older hosts.
-    _AGENT_VERSION = '3'
+    # v4: local (peer/socket) psql+pg_dump now pass an explicit -p so a cluster
+    # on a non-5432 port (e.g. Odoo db_port=6381) is dumped correctly — the
+    # version-matched pg_dump binary bypasses Debian's pg_wrapper and otherwise
+    # defaulted to 5432 ("could not connect ... .s.PGSQL.5432").
+    _AGENT_VERSION = '4'
 
     @staticmethod
     def _backup_norm(value):
@@ -574,7 +578,11 @@ class ServerHost(models.Model):
         except Exception:
             _logger.exception("Backup prune failed for host %s", self.name)
 
-        self.sudo().last_backup = fields.Datetime.now()
+        # Only stamp last_backup when at least one DB actually uploaded — otherwise
+        # a fully-failed run would look "recently backed up" and the daily cron
+        # would skip re-trying it the next day (masking a broken backup).
+        if ok:
+            self.sudo().last_backup = fields.Datetime.now()
         _logger.info("Daily backup on host %s: %s/%s databases uploaded to %s",
                      self.name, ok, len(want), Storage._bucket())
         return (ok, len(want), failed)
@@ -665,7 +673,11 @@ class ServerHost(models.Model):
                         return
                     try:
                         uploaded, total, failed = host._run_daily_backup()
-                        ok = not failed          # success ONLY if nothing was missed
+                        # A run that backed up 0 databases is NEVER a success — a
+                        # host that should have DBs but detected none (or uploaded
+                        # nothing) must not hide behind a green ✅. Success requires
+                        # at least one target AND nothing missed.
+                        ok = bool(total) and not failed
                     except Exception as exc:  # noqa: BLE001 — report, never crash
                         _logger.exception("Manual backup failed for host %s", rec_id)
                         detail = (str(exc) or repr(exc))[-2000:]
@@ -679,6 +691,15 @@ class ServerHost(models.Model):
             if ok:
                 message = _("✅ Backup complete: %(n)s/%(t)s database(s) uploaded "
                             "for %(s)s.") % {'n': uploaded, 't': total, 's': host_name}
+            elif total == 0 and not detail:
+                # No targets at all — the dangerous "looks fine but nothing ran"
+                # case. Report it loudly instead of a misleading success.
+                message = _("⚠️ Nothing was backed up for %(s)s — 0 databases "
+                            "detected. Refresh the server's databases and check "
+                            "the backup storage settings before relying on this.") % {
+                                's': host_name}
+                detail = _("0/0 — no backup targets were found. This is NOT a "
+                           "successful backup.")
             else:
                 named = [d for d in failed if d != '*']
                 message = _("⚠️ Backup: %(n)s/%(t)s uploaded for %(s)s — %(f)s "

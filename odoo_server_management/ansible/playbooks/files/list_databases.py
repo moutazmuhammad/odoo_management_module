@@ -58,6 +58,18 @@ def list_for(conf, odoo_user):
     if is_set(db_host) and db_host not in ('localhost', '127.0.0.1', '::1'):
         hosts.append(db_host)
     attempts = []
+
+    # Most reliable when we run as root (the playbook uses become: yes): connect as
+    # the `postgres` superuser over the local socket (peer auth). The query itself is
+    # scoped to db_user, so this needs NO db_password — it works even when the conf
+    # is unreadable to the SSH user or has no password at all (the exact case where
+    # a host would otherwise detect 0 databases and silently back up nothing).
+    su = ['psql', '-w', '-d', 'postgres', '-tA']
+    if is_set(db_port):
+        su += ['-p', shlex.quote(db_port)]
+    su_cmd = 'PGCONNECT_TIMEOUT=5 ' + ' '.join(su) + ' -c ' + shlex.quote(query)
+    attempts.append('sudo -n -u postgres bash -lc %s' % shlex.quote(su_cmd))
+
     for h in hosts:
         psql = _psql(h)
         if odoo_user:
