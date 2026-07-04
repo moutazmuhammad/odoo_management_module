@@ -447,7 +447,7 @@ class ServerHost(models.Model):
     # on a non-5432 port (e.g. Odoo db_port=6381) is dumped correctly — the
     # version-matched pg_dump binary bypasses Debian's pg_wrapper and otherwise
     # defaulted to 5432 ("could not connect ... .s.PGSQL.5432").
-    _AGENT_VERSION = '5'
+    _AGENT_VERSION = '6'
 
     @staticmethod
     def _backup_norm(value):
