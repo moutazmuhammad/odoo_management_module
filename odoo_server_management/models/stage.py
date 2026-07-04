@@ -23,8 +23,9 @@ _logger = logging.getLogger(__name__)
 SECRET_KEY_ENV = 'ODOO_SERVER_MGMT_KEY'
 
 # Role groups used for in-method authorization (defense in depth behind sudo()).
-# Hierarchy (each implies the previous): User -> DevOps -> Administrator.
+# Hierarchy (each implies the previous): Developer -> Tech Lead -> DevOps -> Administrator.
 GROUP_USER = 'odoo_server_management.group_user'          # Developer: act on stages
+GROUP_TECH_LEAD = 'odoo_server_management.group_tech_lead'  # Tech Lead: Developer + act on Client Server stages
 GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: servers/discover/agent + everything except settings
 GROUP_ADMIN = 'odoo_server_management.group_admin'        # Administrator: + General Settings
 
@@ -102,13 +103,16 @@ class Stage(models.Model):
     client_stage = fields.Boolean(string='Client Server', default=False)
     notes = fields.Text(string='Notes')
     # Per-user flag for the UI: can the current user run operational actions on
-    # this instance? Client servers require Operator+, others any User.
+    # this instance? Client servers require Tech Lead+ (Tech Lead / DevOps /
+    # Admin); normal instances any User (Developer+).
     can_act = fields.Boolean(compute='_compute_can_act', depends_context=('uid',))
 
     @api.depends('client_stage')
     def _compute_can_act(self):
+        # Tech Lead is implied by DevOps and Admin, so this one check covers all
+        # three roles allowed to act on Client Server stages.
         is_operator = (self.env.su
-                       or self.env.user.has_group('odoo_server_management.group_devops'))
+                       or self.env.user.has_group(GROUP_TECH_LEAD))
         for rec in self:
             rec.can_act = (not rec.client_stage) or is_operator
 
@@ -513,9 +517,10 @@ class Stage(models.Model):
 
     def _check_action_access(self):
         """Gate an operational action: a **Client Server** instance may only be
-        acted on by DevOps/Admins; a normal instance by any User."""
+        acted on by Tech Leads/DevOps/Admins; a normal instance by any User.
+        (DevOps and Admin imply Tech Lead, so the single check covers them.)"""
         self.ensure_one()
-        self._check_access(GROUP_DEVOPS if self.client_stage else GROUP_USER)
+        self._check_access(GROUP_TECH_LEAD if self.client_stage else GROUP_USER)
 
     # ===========================
     # Helpers
