@@ -253,7 +253,13 @@ class Conn:
 def _parse_conf(path):
     cfg = {}
     try:
-        with open(path) as fh:
+        # Odoo confs can carry non-UTF-8 bytes (a db_password/admin_passwd pasted
+        # in another encoding, or an unrelated binary file caught by the conf
+        # globs). Decode leniently and never let a single bad file abort the run:
+        # the agent reads EVERY conf on the host to map DB sources, so one stray
+        # byte used to raise UnicodeDecodeError and crash the whole backup before
+        # any database was dumped.
+        with open(path, encoding='utf-8', errors='replace') as fh:
             for line in fh:
                 s = line.strip()
                 if not s or s.startswith((';', '#')):
@@ -261,7 +267,7 @@ def _parse_conf(path):
                 m = re.match(r'([A-Za-z0-9_]+)\s*=\s*(.*)$', s)
                 if m:
                     cfg[m.group(1).lower()] = m.group(2).strip()
-    except OSError:
+    except Exception:
         return None
     return cfg
 
