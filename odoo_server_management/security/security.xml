@@ -13,14 +13,26 @@
         <field name="category_id" ref="group_category_project_roles"/>
     </record>
 
+    <!-- Tech Lead: a Developer who may ALSO run the operational actions on
+         Client Server stages (Start/Stop/Restart, Backup, Upgrade, Pull Code,
+         Branch Config) — the same buttons a Developer gets on normal instances,
+         extended to client servers. Still NO server management, Discover, agent
+         install, or settings (those stay DevOps/Admin). Sees every stage. -->
+    <record id="group_tech_lead" model="res.groups">
+        <field name="name">Tech Lead</field>
+        <field name="category_id" ref="group_category_project_roles"/>
+        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
+    </record>
+
     <!-- DevOps: everything EXCEPT the General Settings menu — manage Servers
          (create), run Discover Instances, Install Self-Backup Agent, act on
          Client Server stages, all server buttons (Test Connection, Check Status,
-         Terminal, Run Backup Now), all stage pages, repository management. -->
+         Terminal, Run Backup Now), all stage pages, repository management.
+         DevOps is a superset of Tech Lead (which is a superset of Developer). -->
     <record id="group_devops" model="res.groups">
         <field name="name">DevOps</field>
         <field name="category_id" ref="group_category_project_roles"/>
-        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
+        <field name="implied_ids" eval="[(4, ref('group_tech_lead'))]"/>
     </record>
 
     <!-- Administrator: DevOps + the global General Settings. -->
@@ -51,6 +63,15 @@
         <field name="model_id" ref="model_server_stage"/>
         <field name="domain_force">[(1, '=', 1)]</field>
         <field name="groups" eval="[(4, ref('group_devops'))]"/>
+    </record>
+    <!-- Tech Leads see every stage (incl. Client Server / DevOps-only hosts), so
+         they can open and act on client-server instances. OR-combined with the
+         Developer rule above for users who hold both. -->
+    <record id="rule_stage_tech_lead_all" model="ir.rule">
+        <field name="name">Stages: Tech Leads see all</field>
+        <field name="model_id" ref="model_server_stage"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="groups" eval="[(4, ref('group_tech_lead'))]"/>
     </record>
 
 </odoo>
