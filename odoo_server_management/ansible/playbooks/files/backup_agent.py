@@ -21,6 +21,7 @@ import ssl
 import sys
 import json
 import urllib.request
+import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import smart_backup as sb  # noqa: E402
@@ -30,7 +31,7 @@ CONF = '/etc/odoo-backup.conf'
 
 def load_conf(path=CONF):
     cfg = {}
-    with open(path) as fh:
+    with open(path, encoding='utf-8', errors='replace') as fh:
         for ln in fh:
             ln = ln.strip()
             if ln and not ln.startswith('#') and '=' in ln:
@@ -60,14 +61,7 @@ class _KeepPostRedirect(urllib.request.HTTPRedirectHandler):
             method='POST')
 
 
-def post(url, payload, insecure=False, host_header='', timeout=180):
-    data = json.dumps({'jsonrpc': '2.0', 'method': 'call',
-                       'params': payload}).encode()
-    headers = {'Content-Type': 'application/json'}
-    if host_header:
-        # Reach the manager by IP but route to the right nginx vhost (avoids any
-        # DNS dependency on the managed servers). Carried across the redirect too.
-        headers['Host'] = host_header
+def _do_post(url, data, headers, insecure, timeout):
     # An ssl context is always prepared: even when `url` is http, the manager may
     # 301 us to https, and the opener's HTTPS handler needs the (optionally
     # insecure) context ready for that hop.
@@ -78,7 +72,33 @@ def post(url, payload, insecure=False, host_header='', timeout=180):
     opener = urllib.request.build_opener(
         _KeepPostRedirect(), urllib.request.HTTPSHandler(context=ctx))
     req = urllib.request.Request(url, data=data, headers=headers, method='POST')
-    resp = json.loads(opener.open(req, timeout=timeout).read().decode())
+    return json.loads(opener.open(req, timeout=timeout).read().decode())
+
+
+def post(url, payload, insecure=False, host_header='', timeout=180):
+    data = json.dumps({'jsonrpc': '2.0', 'method': 'call',
+                       'params': payload}).encode()
+    headers = {'Content-Type': 'application/json'}
+    if host_header:
+        # Reach the manager by IP but route to the right nginx vhost (avoids any
+        # DNS dependency on the managed servers). Carried across the redirect too.
+        headers['Host'] = host_header
+    try:
+        resp = _do_post(url, data, headers, insecure, timeout)
+    except urllib.error.URLError as exc:
+        # Old managed servers ship a stale CA bundle that cannot verify the
+        # manager's (Let's Encrypt) certificate on the http->https redirect, which
+        # otherwise fails the ENTIRE backup. The manager authenticates us by source
+        # IP and only ever hands back short-lived upload URLs, so fall back to one
+        # unverified retry rather than skip the backup. (Keeping the servers' CA
+        # bundle current avoids this path.)
+        reason = getattr(exc, 'reason', exc)
+        if not insecure and isinstance(reason, ssl.SSLError):
+            print('backup-agent: manager TLS verify failed (%s); retrying '
+                  'without verification' % str(reason)[:120])
+            resp = _do_post(url, data, headers, True, timeout)
+        else:
+            raise
     if resp.get('error'):
         raise RuntimeError('manager error: %s' % resp['error'])
     result = resp.get('result') or {}
@@ -124,7 +144,18 @@ def main():
             if x.strip()]
     if only:
         targets = [t for t in targets if t.get('db') in only]
-    items = sb._size_targets(targets)
+    try:
+        items = sb._size_targets(targets)
+    except Exception as exc:  # noqa: BLE001 — sizing must never abort the whole run
+        # Belt-and-suspenders: if sizing blows up for any reason, still attempt the
+        # backup with unsized targets (size 0 -> single-PUT path) instead of losing
+        # the whole run. The per-DB loop below already isolates individual failures.
+        print('backup-agent: sizing failed (%s); backing up unsized'
+              % str(exc)[:200])
+        items = [{'db': (t.get('db') or '').strip(),
+                  'domain': t.get('domain') or '', 'port': t.get('port') or '',
+                  'filestore': '', 'size': 0}
+                 for t in targets if (t.get('db') or '').strip()]
     if not items:
         print('backup-agent: no databases to back up')
         return
