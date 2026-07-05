@@ -144,18 +144,35 @@ def _pg_dump_bin(server_major):
 # ======================================================================
 # Database connection (local peer OR remote TCP), derived from Odoo confs
 # ======================================================================
+def _conf_unset(v):
+    """Normalise an Odoo conf value: `False`/`None` (Odoo's "not set" sentinels,
+    any case) and blanks collapse to '' so they are never handed to psql/pg_dump."""
+    s = ('' if v is None else str(v)).strip()
+    return '' if s.lower() in ('false', 'none') else s
+
+
 class Conn:
     """A way to reach one PostgreSQL server. Local = peer auth via `postgres`;
     remote = TCP with -h/-p/-U and PGPASSWORD."""
 
     def __init__(self, host='', port='', user='', password=''):
-        h = (host or '').strip()
-        self.local = h in ('', 'localhost', '127.0.0.1', '::1',
-                            '/var/run/postgresql', '/tmp', 'false', 'False')
+        # Odoo writes the literal `False` (and sometimes `None`) into its confs to
+        # mean "not set" — e.g. a remote-PG instance keeps `db_host = 10.x.x.x` but
+        # leaves `db_port = False` / `db_password = False` to inherit the client
+        # defaults. Those sentinels must NEVER be passed verbatim to psql/pg_dump:
+        # a literal `-p False` fails with `invalid integer value "False"`, which
+        # made EVERY connection to such a server fail, so detection silently
+        # dropped the DB and the daily backup reported "Uploaded 0 of 1".
+        h = _conf_unset(host)
+        self.local = h.lower() in ('', 'localhost', '127.0.0.1', '::1',
+                                   '/var/run/postgresql', '/tmp')
         self.host = '' if self.local else h
-        self.port = str(port or '').strip()
-        self.user = (user or '').strip()
-        self.password = password or ''
+        # Only a purely-numeric port is meaningful; `False`/`None`/blank -> use the
+        # client default (5432 remote, or the auto-detected local cluster).
+        p = _conf_unset(port)
+        self.port = p if p.isdigit() else ''
+        self.user = _conf_unset(user)
+        self.password = '' if _conf_unset(password) == '' else password
 
     def key(self):
         return 'local' if self.local else '%s:%s:%s' % (self.host, self.port, self.user)
