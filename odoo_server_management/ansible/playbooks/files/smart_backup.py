@@ -61,8 +61,26 @@ def _pg_prefix():
 PG = _pg_prefix()
 
 
+# subprocess.run gained the text-mode `encoding=`/`errors=` kwargs only in Python
+# 3.6; on 3.5 they raise TypeError and would abort the whole backup. Managed Odoo
+# hosts run whatever `python3` they ship (seen as old as 3.6.9, and 3.5 on 16.04),
+# so route EVERY captured-output subprocess through this helper: pass the kwargs on
+# 3.6+, and on 3.5 capture raw bytes and decode them the SAME lenient UTF-8 way.
+# Both paths return a CompletedProcess whose stdout/stderr are str.
+_HAS_TEXT_KW = sys.version_info >= (3, 6)
+
+
 def _run(cmd, **kw):
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace', **kw)
+    kw.setdefault('stdout', subprocess.PIPE)
+    kw.setdefault('stderr', subprocess.PIPE)
+    if _HAS_TEXT_KW:
+        return subprocess.run(cmd, encoding='utf-8', errors='replace', **kw)
+    r = subprocess.run(cmd, **kw)
+    if isinstance(r.stdout, (bytes, bytearray)):
+        r.stdout = bytes(r.stdout).decode('utf-8', 'replace')
+    if isinstance(r.stderr, (bytes, bytearray)):
+        r.stderr = bytes(r.stderr).decode('utf-8', 'replace')
+    return r
 
 
 def _scan_pg_dumps():
@@ -73,7 +91,7 @@ def _scan_pg_dumps():
         if m:
             bins[int(m.group(1))] = p
     try:
-        r = subprocess.run(['pg_dump', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace')
+        r = _run(['pg_dump', '--version'])
         mm = re.search(r'(\d+)\.\d+', r.stdout or '')
         if mm:
             bins.setdefault(int(mm.group(1)), 'pg_dump')
@@ -90,7 +108,7 @@ def _install_pg_client(major):
                 ['sudo', '-n', 'apt-get', 'install', '-y', '-qq',
                  'postgresql-client-%d' % major]):
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace', timeout=600)
+            _run(cmd, timeout=600)
         except Exception:
             return
 
@@ -191,7 +209,7 @@ class Conn:
 
     def psql_scalar(self, db, sql):
         cmd, env = self._cmd('psql', db, ['-tAc', sql])
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace', env=env)
+        r = _run(cmd, env=env)
         return r.stdout.strip() if r.returncode == 0 else ''
 
     def server_major(self, db):
@@ -239,7 +257,7 @@ class Conn:
         cands = [None, 'postgres'] if self.local else self._maint_candidates(hints)
         for cand in cands:
             cmd, env = self._cmd('psql', cand, ['-tAc', sql])
-            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace', env=env)
+            r = _run(cmd, env=env)
             if r.returncode == 0:
                 return [d.strip() for d in r.stdout.splitlines() if d.strip()]
         return []
@@ -275,7 +293,7 @@ def _parse_conf(path):
 def _conf_files():
     confs = set()
     try:
-        ps = subprocess.run(['ps', '-eo', 'args'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace').stdout
+        ps = _run(['ps', '-eo', 'args']).stdout
     except Exception:
         ps = ''
     for line in ps.splitlines():
@@ -471,7 +489,7 @@ def parse_nginx():
 def _data_dir_candidates():
     dirs, confs = set(), set()
     try:
-        ps = subprocess.run(['ps', '-eo', 'args'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace').stdout
+        ps = _run(['ps', '-eo', 'args']).stdout
     except Exception:
         ps = ''
     for line in ps.splitlines():
@@ -498,10 +516,9 @@ def find_filestore(db):
         if os.path.isdir(p):
             return p
     try:
-        r = subprocess.run(
+        r = _run(
             ['find', '/opt', '/home', '/var/lib', '-maxdepth', '7', '-type', 'd',
-             '-path', '*/filestore/' + db, '-print', '-quit'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace', timeout=90)
+             '-path', '*/filestore/' + db, '-print', '-quit'], timeout=90)
         for hit in r.stdout.splitlines():
             if hit and os.path.isdir(hit):
                 return hit
@@ -658,7 +675,7 @@ def build_manifest(conn, db):
     cmd, env = conn._cmd('psql', db, ['-tAF', '\t', '-c',
                          "SELECT name, latest_version FROM ir_module_module "
                          "WHERE state='installed'"])
-    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace', env=env)
+    r = _run(cmd, env=env)
     for line in r.stdout.splitlines():
         if '\t' in line:
             n, v = line.split('\t', 1)
@@ -679,21 +696,61 @@ def _write_zip_contents(z, conn, db, filestore):
     cmd, env = conn.dump_cmd(db, conn.server_major(db), ['--no-owner'])
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env)
-    # force_zip64: the dump is streamed with an unknown size into a possibly
-    # non-seekable target (multipart), so ZIP64 must be reserved up front —
-    # otherwise a >4 GB dump.sql raises "File size exceeded ZIP64 limit".
-    with z.open('dump.sql', 'w', force_zip64=True) as zf:
-        while True:
-            chunk = proc.stdout.read(CHUNK)
-            if not chunk:
-                break
-            zf.write(chunk)
-    err = proc.stderr.read()
-    if proc.wait() != 0:
-        raise RuntimeError('pg_dump failed: %s'
-                           % (err or b'').decode('utf-8', 'replace').strip()[:300])
-    with z.open('manifest.json', 'w') as zf:
-        zf.write(json.dumps(build_manifest(conn, db), indent=4).encode())
+
+    def _dump_failed():
+        err = proc.stderr.read()
+        return RuntimeError('pg_dump failed: %s'
+                            % (err or b'').decode('utf-8', 'replace').strip()[:300])
+
+    if sys.version_info >= (3, 6):
+        # PREFERRED (Python 3.6+): stream pg_dump straight into the zip entry, so
+        # the database is never staged uncompressed on disk. force_zip64: the dump
+        # is streamed with an unknown size into a possibly non-seekable target
+        # (multipart), so ZIP64 must be reserved up front — otherwise a >4 GB
+        # dump.sql raises "File size exceeded ZIP64 limit".
+        with z.open('dump.sql', 'w', force_zip64=True) as zf:
+            while True:
+                chunk = proc.stdout.read(CHUNK)
+                if not chunk:
+                    break
+                zf.write(chunk)
+        if proc.wait() != 0:
+            raise _dump_failed()
+    else:
+        # Python 3.5 fallback: ZipFile.open() has no write mode before 3.6, so
+        # spool the dump to a temp file on the SAME disk-backed scratch as the zip
+        # (needs ~uncompressed-DB scratch there) then add it; z.write auto-selects
+        # ZIP64 for a >4 GB entry. Keeps backups working on pre-3.6 hosts.
+        tmpdir = None
+        if getattr(z, 'filename', None):
+            tmpdir = os.path.dirname(z.filename)
+        else:
+            for d in (os.environ.get('ODOO_BACKUP_TMPDIR'), '/var/tmp',
+                      tempfile.gettempdir()):
+                if d and os.path.isdir(d):
+                    tmpdir = d
+                    break
+        tmp = tempfile.NamedTemporaryFile(prefix='dump-', suffix='.sql',
+                                          dir=tmpdir, delete=False)
+        try:
+            while True:
+                chunk = proc.stdout.read(CHUNK)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+            tmp.close()
+            if proc.wait() != 0:
+                raise _dump_failed()
+            z.write(tmp.name, 'dump.sql')
+        finally:
+            try:
+                os.remove(tmp.name)
+            except OSError:
+                pass
+    # writestr works on every python3 (the data length is known up front, so it
+    # needs no seekable target) — no write-mode z.open() required for a small entry.
+    z.writestr('manifest.json',
+               json.dumps(build_manifest(conn, db), indent=4).encode())
     if filestore and os.path.isdir(filestore):
         for root, _dirs, files in os.walk(filestore):
             for f in files:
@@ -798,7 +855,7 @@ def _curl_put(url, path, length=None, offset=0):
                 '-H %s --data-binary @- %s'
                 % (shlex.quote(path), offset, length,
                    shlex.quote('Content-Length: %d' % length), shlex.quote(url)))
-        r = subprocess.run(pipe, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace')
+        r = _run(pipe, shell=True)
         head = r.stdout
     if r.returncode != 0:
         raise RuntimeError('upload failed (%s): %s'
