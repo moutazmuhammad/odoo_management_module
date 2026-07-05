@@ -48,6 +48,23 @@ def run_as(user, cmd):
     return ""
 
 
+def sh_root(cmd):
+    """Run `cmd`, escalating to root via passwordless sudo when available.
+
+    Some hosts ship their systemd unit files (/etc/systemd/system/*.service)
+    root-only (e.g. mode 0750 root:root). `systemctl cat` reads that FILE, so it
+    fails with "Permission denied" for the unprivileged SSH user — and every Odoo
+    service is then missed, making discovery silently return []. (systemctl's
+    D-Bus queries like `list-units` are unaffected, but escalate them too so a
+    host that also restricts those to root still gets scanned.) Falls back to a
+    plain run when sudo isn't available or the escalated call yields nothing."""
+    if SUDO:
+        out = sh("sudo -n " + cmd)
+        if out:
+            return out
+    return sh(cmd)
+
+
 def git(root, args, user):
     # safe.directory=* bypasses the git dubious-ownership guard.
     return run_as(user, "git -c safe.directory='*' -C %s %s" % (shlex.quote(root), args))
@@ -219,11 +236,11 @@ def find_core_modules(addons_path, user, core_roots):
 
 
 units = set()
-for line in sh("systemctl list-unit-files --type=service --no-legend --plain").splitlines():
+for line in sh_root("systemctl list-unit-files --type=service --no-legend --plain").splitlines():
     parts = line.split()
     if parts:
         units.add(parts[0])
-for line in sh("systemctl list-units --type=service --all --no-legend --plain").splitlines():
+for line in sh_root("systemctl list-units --type=service --all --no-legend --plain").splitlines():
     parts = line.split()
     if parts:
         units.add(parts[0])
@@ -456,7 +473,7 @@ def web_base_url_domain(conf):
 def scan_unit(unit):
     """Return the discovery dict for one systemd unit, or None if it is not an
     Odoo service. Raises only on unexpected errors (caller skips that unit)."""
-    cat = sh("systemctl cat %s 2>/dev/null" % unit)
+    cat = sh_root("systemctl cat %s" % unit)
     m = re.search(r'^\s*ExecStart=(.*)$', cat, re.M)
     if not m:
         return None
