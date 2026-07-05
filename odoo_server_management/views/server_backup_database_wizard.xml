@@ -13,7 +13,10 @@
                   <field name="db_name" placeholder="e.g. odex25_rajhi_dev_db"
                          attrs="{'invisible': [('db_source', '!=', 'manual')],
                                  'required': [('db_source', '=', 'manual')]}"/>
-                  <field name="backup_format" widget="radio"/>
+                  <div class="text-muted" colspan="2" style="font-size:12px;">
+                      Takes a full Odoo backup (database + filestore) — the same
+                      format as the daily backups — and downloads it when ready.
+                  </div>
               </group>
               <footer>
                   <button string="Backup" type="object" name="action_backup" class="btn-primary"/>

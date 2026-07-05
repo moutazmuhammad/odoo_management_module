@@ -610,6 +610,21 @@ class ServerHost(models.Model):
         seg = self._instance_seg(it) or ip_seg
         key = Storage._object_key(
             [category, server_seg, seg, db, '%s_%s.zip' % (db, day)])
+        return self._backup_db_to_key(Storage, it, key)
+
+    def _backup_db_to_key(self, Storage, it, key):
+        """Dump + zip + upload ONE already-sized database (`it` = {db, filestore,
+        size}) to the given object `key`, in its own ansible run (own timeout),
+        single or multipart, completing/aborting the multipart upload. Returns True
+        on success. Shared by the daily backup (per-stage dated keys) and the manual
+        'Backup Now' (manual/ keys) so both take the SAME Odoo-format zip via a
+        direct pg_dump — never Odoo's /web/database/backup endpoint, which silently
+        returns an HTML error page (saved as a corrupt zip) when its server-side
+        pg_dump fails."""
+        self.ensure_one()
+        db = it.get('db')
+        if not db:
+            return False
         size = int(it.get('size') or 0)
         fs = it.get('filestore') or ''
         mp = None
@@ -644,6 +659,54 @@ class ServerHost(models.Model):
         _logger.warning("Backup failed for %s/%s: %s", self.name, db,
                         (res or {}).get('error') if isinstance(res, dict) else res)
         return False
+
+    def _run_manual_backup(self, stage, db):
+        """On-demand 'Backup Now' for ONE database. Sizes + dumps + zips + uploads it
+        to the manual/ area using the SAME robust pg_dump→zip→presigned-upload path
+        as the daily backup (NOT Odoo's /web/database/backup, which streams a
+        server-built zip that silently degrades to an HTML error page — saved as a
+        corrupt zip — whenever its own pg_dump/-tmp step fails). Returns a result
+        dict {ok, message, url?, detail?} for _run_bg (auto-downloads when 'url' is
+        set). The manual/ area is wiped daily by _cron_purge_manual."""
+        self.ensure_one()
+        Storage = self.env['server.backup.storage']
+        if not Storage._keys_set():
+            return {'ok': False, 'message': _(
+                "Backup storage is not configured. Set the bucket and keys in "
+                "Server Management → General Settings → Backups.")}
+        # Build the single target (segment from the stage name → domain, else the
+        # numeric ':<port>' of an ip:port name), then size it on the client exactly
+        # like the daily detect does.
+        name = (stage.name or '').strip()
+        m = re.search(r':(\d+)', name)
+        domain, port = ('', m.group(1)) if m else (name, '')
+        targets_b64 = base64.b64encode(
+            json.dumps([{'db': db, 'domain': domain, 'port': port}]).encode()).decode()
+        detect = self._run('backup_detect.yml', {'targets_b64': targets_b64})
+        if not detect.get('success'):
+            return {'ok': False,
+                    'message': _("❌ Could not reach the database server for %s.") % db,
+                    'detail': detect.get('output')}
+        items = self._parse_backup_json(detect.get('output'), 'ODOO_BACKUP_DETECT:') or []
+        it = next((x for x in items if x.get('db') == db), None)
+        if not it:
+            return {'ok': False, 'message': _(
+                "❌ Database %s is not reachable on this server (check that it "
+                "exists and the instance's Odoo conf is correct).") % db}
+        # manual/<category>/<seg>/<db>.zip — same layout backup_browse expects, and
+        # a FIXED key so each press overwrites the previous manual backup of this db.
+        category = self.backup_category or 'odex'
+        seg = self._backup_host_seg(stage.name) or self._backup_host_seg(self.ip)
+        key = Storage._object_key(['manual', category, seg, '%s.zip' % db])
+        if not self._backup_db_to_key(Storage, it, key):
+            return {'ok': False, 'message': _(
+                '❌ Backup of %s failed — see Last Operation Details.') % db}
+        try:
+            url = Storage._presign_get(key, filename='%s.zip' % db)
+        except Exception:  # noqa: BLE001 — backup is safe in the bucket; just no link
+            url = ''
+        return {'ok': True, 'url': url,
+                'message': _('✅ Backup of %s ready — downloading…') % db}
 
     def action_run_backup_now(self):
         """Manually run the full backup for this server in the BACKGROUND (bypasses
