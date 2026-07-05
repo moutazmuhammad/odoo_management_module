@@ -453,7 +453,12 @@ class ServerHost(models.Model):
     # ZipFile.open('w') feature) falls back to a temp-file spool on 3.5, with the
     # manifest written via version-agnostic writestr. (PostgreSQL-version matching
     # was already handled: pick pg_dump >= server major, else self-heal-install it.)
-    _AGENT_VERSION = '7'
+    # v8: smart_backup.py no longer passes a conf's `db_port = False` sentinel to
+    # psql/pg_dump as `-p False` (invalid integer -> every connection to a remote-PG
+    # host failed, so detection silently dropped the DB and the daily backup
+    # reported "Uploaded 0 of 1"). `False`/`None` conf values now collapse to the
+    # client default; only a numeric db_port is honoured.
+    _AGENT_VERSION = '8'
 
     @staticmethod
     def _backup_norm(value):
