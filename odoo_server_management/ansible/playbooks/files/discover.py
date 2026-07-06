@@ -381,6 +381,12 @@ def parse_nginx():
         for m in re.finditer(r'upstream\s+(\S+)\s*\{([^}]*)\}', text, re.S):
             upstreams[m.group(1)] = re.findall(r'server\s+[^;]*?:(\d+)', m.group(2))
     port_info = {}
+    # Every routable domain that appears ANYWHERE in a given nginx file, keyed by
+    # file path. A domain is often declared in a block that carries no backend —
+    # most commonly the bare `listen 80; server_name x; return 301 https://...`
+    # redirect — while the TLS block that actually proxies to Odoo omits
+    # server_name. Recording domains per file lets us reunite them below.
+    file_domains = {}
     for path, text in texts.items():
         for block in _extract_blocks(text, 'server'):
             domains = []
@@ -390,6 +396,10 @@ def parse_nginx():
                     if (tok and tok not in ('_', 'localhost')
                             and not tok.startswith('$') and not _is_ip(tok)):
                         domains.append(tok)
+            fd = file_domains.setdefault(path, [])
+            for d in domains:
+                if d not in fd:
+                    fd.append(d)
             primary = domains[0] if domains else ''
             lm = re.search(r'listen\s+([^;]+);', block)
             listen = ''
@@ -421,6 +431,27 @@ def parse_nginx():
                 for d in domains:
                     if d and d not in cur['domains']:
                         cur['domains'].append(d)
+
+    # Cross-block fallback. A backend port may sit in a TLS `server {}` block that
+    # carries the proxy_pass but NO server_name, while the site's real domain
+    # lives in a SEPARATE redirect block (`listen 80; server_name x; return 301
+    # https://...`) in the same file. Matching domains to ports within a single
+    # block therefore leaves such an instance domainless — named ip:<listen> —
+    # even though the domain is right there in the file. When a port has no domain
+    # of its own but its nginx file names exactly ONE site (a single apex domain
+    # across all of that file's blocks), adopt it: that pairing is unambiguous.
+    # Files that front several distinct sites are left untouched (the instance
+    # stays ip:port and is flagged for review) rather than guessing which domain
+    # belongs to which backend.
+    _apex = lambda d: re.sub(r'^www\.', '', (d or '').strip().lower())
+    for info in port_info.values():
+        if info.get('domain'):
+            continue
+        fdoms = file_domains.get(info.get('file')) or []
+        if len({_apex(d) for d in fdoms}) == 1:
+            info['domain'] = fdoms[0]
+            if not info.get('domains'):
+                info['domains'] = list(fdoms)
     return port_info
 
 
