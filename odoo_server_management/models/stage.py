@@ -37,6 +37,11 @@ SENSITIVE_VAR_KEYS = {
     'db_password', 'public_key', 'private_key',
 }
 
+# A routable domain name (FQDN). Used to tell a domain-named instance from one that
+# is only reachable as <ip>:<port> (which should be given a real domain).
+_FQDN_RE = re.compile(
+    r'^(?=.{1,253}$)(?!-)([A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63}$')
+
 
 def _clean_ansible_log(raw, ok):
     """Human-friendly 'Last Operation Details': show ERRORS ONLY.
@@ -179,6 +184,15 @@ class Stage(models.Model):
              "fronted by several nginx domains, or the detected domain is invalid. "
              "Pick the correct one by editing the Stage Name.",
     )
+    # Live (from the name): the instance has NO domain — it is named/reached by
+    # <ip>:<port>. The operator should give it a real domain (Stage Name) and
+    # re-run discovery, after which its backup lands under a domain-named folder.
+    domain_missing = fields.Boolean(
+        string='No Domain', compute='_compute_domain_missing',
+        search='_search_domain_missing',
+        help="This instance has no domain (reached by <ip>:<port>). Set its domain "
+             "in the Stage Name, run 'Sync Domain → Nginx', then Discover again — "
+             "its backup then moves under a folder named after the domain.")
     # ------------------------------------------------------------------
     # Per-instance daily-backup governance (each instance tracked on its own).
     # ------------------------------------------------------------------
@@ -699,6 +713,24 @@ class Stage(models.Model):
                 not s.last_backup or s.last_backup < cutoff))
         want = (operator == '=') == bool(value)
         return [('id', 'in' if want else 'not in', overdue.ids)]
+
+    @staticmethod
+    def _name_has_no_domain(name):
+        name = (name or '').strip()
+        # No domain when named by <ip>:<port> (has a :port), or the name is simply
+        # not a routable FQDN (e.g. the "<server> / <service>" fallback).
+        return bool(name) and (bool(re.search(r':\d+', name))
+                               or not _FQDN_RE.match(name))
+
+    @api.depends('name')
+    def _compute_domain_missing(self):
+        for s in self:
+            s.domain_missing = self._name_has_no_domain(s.name)
+
+    def _search_domain_missing(self, operator, value):
+        missing = self.search([]).filtered('domain_missing')
+        want = (operator == '=') == bool(value)
+        return [('id', 'in' if want else 'not in', missing.ids)]
 
     def action_sync_domain_to_nginx(self):
         """Push the manually-entered domain (Stage Name) into this instance's
