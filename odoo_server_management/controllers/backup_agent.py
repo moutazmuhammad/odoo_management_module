@@ -151,5 +151,9 @@ class BackupAgentController(http.Controller):
                 Storage._prune(Storage._object_key([category, (host.ip or '').replace('.', '-')]) + '/')
             except Exception:  # noqa: BLE001
                 _logger.exception("agent prune failed for host %s", host.name)
-            host.sudo().last_backup = fields.Datetime.now()
+            # Only advance last_backup when at least one database actually uploaded
+            # this run — otherwise a fully-failed backup would look "healthy" and
+            # mask a broken host (the per-db success above already stamps it).
+            if ok:
+                host.sudo().last_backup = fields.Datetime.now()
         return {'ok': ok}

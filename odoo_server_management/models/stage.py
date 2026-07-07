@@ -608,11 +608,19 @@ class Stage(models.Model):
         def work(stage):
             statuses = stage.host_id._service_statuses(stage)
             v = statuses.get(stage.service_name)
-            status = ('running' if v in ('active', 'activating')
-                      else ('stopped' if v else False))
+            if v in ('active', 'activating'):
+                odoo_status, running = 'running', True
+            elif v and v != 'unknown':
+                # inactive / failed / deactivating -> genuinely stopped.
+                odoo_status, running = 'stopped', False
+            else:
+                # The probe itself could not determine the state (SSH/host error
+                # -> None or 'unknown'). Do NOT assert 'stopped' — that made a
+                # running instance show as 🔴 Stopped. Keep the last known status,
+                # mirroring server_host._refresh_status.
+                odoo_status, running = stage.odoo_status, stage.service_status
             return {'ok': True, 'message': _('🔄 Status refreshed.'),
-                    'odoo_status': status or stage.odoo_status,
-                    'service_status': status == 'running'}
+                    'odoo_status': odoo_status, 'service_status': running}
         return work
 
     def action_check_status_now(self):

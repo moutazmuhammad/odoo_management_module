@@ -24,12 +24,16 @@ class LiveLogStreamController(http.Controller):
     """
 
     def _authorized_stage(self, stage_id):
-        stage = request.env['server.stage'].browse(stage_id).exists()
-        if not stage:
-            raise request.not_found()
         user = request.env.user
         if not user.has_group(GROUP_USER):
             raise AccessError(_("You are not allowed to view these logs."))
+        # search() (not browse().exists()) so the server.stage record rules apply:
+        # exists() runs a raw id-IN query that BYPASSES ir.rules, which would let a
+        # plain Developer stream the logs of a devops_only host's instance they are
+        # not allowed to see. search() returns empty when the rule hides it.
+        stage = request.env['server.stage'].search([('id', '=', stage_id)], limit=1)
+        if not stage:
+            raise request.not_found()
         return stage
 
     @http.route('/log/stream/<int:stage_id>', auth='user', type='http', website=True)

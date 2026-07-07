@@ -214,32 +214,55 @@ class BackupStorage(models.AbstractModel):
 
     @api.model
     def _prune(self, key_prefix, retention_days=None):
-        """Delete objects under `key_prefix` older than retention_days."""
+        """Delete objects under `key_prefix` older than retention_days — but NEVER
+        the most recent object in each database's folder.
+
+        Without that floor, a host whose nightly backup has been FAILING to upload
+        for longer than the retention window would have its last good backup age
+        past the threshold and get deleted here, leaving ZERO backups for that
+        server — precisely when they matter most. Keeping the newest object per db
+        folder means an old backup is only ever removed once a newer one exists."""
         retention_days = self._retention_days() if retention_days is None else retention_days
         if not retention_days or retention_days <= 0:
             return 0
         import datetime
         cli = self._boto_client()
         bucket = self._bucket()
-        deleted, token = 0, None
+        # 1. Collect every object under the prefix (all pages).
+        objs, token = [], None
         while True:
             kw = {'Bucket': bucket, 'Prefix': key_prefix}
             if token:
                 kw['ContinuationToken'] = token
             resp = cli.list_objects_v2(**kw)
-            old = []
-            for obj in resp.get('Contents', []):
-                lm = obj['LastModified']
-                age = (datetime.datetime.now(lm.tzinfo) - lm).days
-                if age > retention_days:
-                    old.append({'Key': obj['Key']})
-            if old:
-                cli.delete_objects(Bucket=bucket, Delete={'Objects': old})
-                deleted += len(old)
+            objs.extend(resp.get('Contents', []))
             if resp.get('IsTruncated'):
                 token = resp.get('NextContinuationToken')
             else:
                 break
+        # 2. Retention floor: the newest object in each db folder (the key up to
+        #    its last '/') is always kept, whatever its age.
+        newest = {}
+        for obj in objs:
+            folder = obj['Key'].rsplit('/', 1)[0]
+            cur = newest.get(folder)
+            if cur is None or obj['LastModified'] > cur['LastModified']:
+                newest[folder] = obj
+        keep_keys = {o['Key'] for o in newest.values()}
+        # 3. Delete only aged-out objects that are NOT their db's last backup.
+        old = []
+        for obj in objs:
+            if obj['Key'] in keep_keys:
+                continue
+            lm = obj['LastModified']
+            age = (datetime.datetime.now(lm.tzinfo) - lm).days
+            if age > retention_days:
+                old.append({'Key': obj['Key']})
+        deleted = 0
+        for i in range(0, len(old), 1000):   # S3 delete_objects caps at 1000/call
+            batch = old[i:i + 1000]
+            cli.delete_objects(Bucket=bucket, Delete={'Objects': batch})
+            deleted += len(batch)
         return deleted
 
     @api.model

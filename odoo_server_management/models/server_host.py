@@ -581,13 +581,17 @@ class ServerHost(models.Model):
         # Anything we couldn't size/reach or that failed to upload = not done.
         failed = sorted(want - done)
 
-        # 3. Prune old daily objects for this server (legacy folders too).
-        try:
-            Storage._prune(Storage._object_key([category, server_seg]) + '/')
-            Storage._prune(Storage._object_key([category, ip_seg]) + '/')
-            Storage._prune(Storage._object_key([category, (self.ip or '').replace('.', '-')]) + '/')
-        except Exception:
-            _logger.exception("Backup prune failed for host %s", self.name)
+        # 3. Prune old daily objects for this server (legacy folders too) — but only
+        #    after at least one DB uploaded this run, so a fully-failed run never
+        #    ages out the last good backup. (_prune also keeps the newest object per
+        #    db folder as a hard floor.)
+        if ok:
+            try:
+                Storage._prune(Storage._object_key([category, server_seg]) + '/')
+                Storage._prune(Storage._object_key([category, ip_seg]) + '/')
+                Storage._prune(Storage._object_key([category, (self.ip or '').replace('.', '-')]) + '/')
+            except Exception:
+                _logger.exception("Backup prune failed for host %s", self.name)
 
         # Only stamp last_backup when at least one DB actually uploaded — otherwise
         # a fully-failed run would look "recently backed up" and the daily cron
