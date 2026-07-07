@@ -392,9 +392,15 @@ def parse_nginx():
             domains = []
             for sn in re.findall(r'server_name\s+([^;]+);', block):
                 for tok in sn.split():
-                    tok = tok.strip()
+                    tok = tok.strip().rstrip('.')
+                    # A wildcard vhost (server_name *.example.com) has no single
+                    # hostname — use its BASE domain (example.com) as the canonical,
+                    # VALID name instead of the unroutable "*.example.com".
+                    if tok.startswith('*.'):
+                        tok = tok[2:]
                     if (tok and tok not in ('_', 'localhost')
-                            and not tok.startswith('$') and not _is_ip(tok)):
+                            and not tok.startswith('$') and not tok.startswith('*')
+                            and not _is_ip(tok) and tok not in domains):
                         domains.append(tok)
             fd = file_domains.setdefault(path, [])
             for d in domains:
