@@ -1424,13 +1424,24 @@ class ServerHost(models.Model):
             # the same Odoo). Discovery picks one deterministically, but which is
             # "correct" is the operator's call — flag it for manual review with the
             # full candidate list rather than silently choosing.
-            domain_candidates = [d for d in (inst.get('domain_candidates') or []) if d]
+            # Defensive: a wildcard vhost -> its base domain (already handled in
+            # discover.py, but normalise here too so an older payload / hand-edited
+            # "*.x" never yields an invalid stage name).
+            def _dewild(d):
+                d = (d or '').strip().rstrip('.')
+                return d[2:] if d.startswith('*.') else d
+            domain_candidates, _seen_dc = [], set()
+            for _d in (inst.get('domain_candidates') or []):
+                _dd = _dewild(_d)
+                if _dd and _dd not in _seen_dc:
+                    _seen_dc.add(_dd)
+                    domain_candidates.append(_dd)
             domain_ambiguous = bool(inst.get('domain_ambiguous')) and len(domain_candidates) > 1
             # Stage name uses the SAME source as the backup path (nginx domain, else
             # <ip>:<port> where port = nginx listen port (domainless vhost) or the
             # conf http_port). Only difference vs the bucket path: the name keeps
             # ip:port while the path uses ip-port.
-            domain = (inst.get('domain') or '').strip()
+            domain = _dewild(inst.get('domain'))
             # A leading "www." is a routine alias of the apex domain, not a distinct
             # instance — name the stage by the apex (www.alowaidah.org.sa ->
             # alowaidah.org.sa) so it reads cleanly and stays consistent with the
