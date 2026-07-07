@@ -36,6 +36,7 @@
         'views/log_stream_template.xml',
         'views/terminal_template.xml',
         'views/server_backup_database_wizard.xml',
+        'views/server_stage_delete_wizard.xml',
     ],
     'assets': {
         'web.assets_backend': [

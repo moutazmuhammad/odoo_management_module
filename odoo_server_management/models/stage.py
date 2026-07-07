@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import base64
 import time
 import shutil
 import logging
@@ -1236,6 +1237,71 @@ class Stage(models.Model):
             'view_mode': 'form',
             'target': 'new',
             'context': ctx,
+        }
+
+    def action_delete_instance(self):
+        """Open the confirmation dialog to permanently remove this (broken/old/unused)
+        instance — the manager record plus, optionally, its service/nginx/db on the
+        server. Destructive → DevOps/Admin only."""
+        self._check_access(GROUP_DEVOPS)
+        self.ensure_one()
+        return {
+            'name': _('Delete Instance'),
+            'type': 'ir.actions.act_window',
+            'res_model': 'server.stage.delete.wizard',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': dict(self.env.context, default_stage_id=self.id),
+        }
+
+    def _decommission(self, opts):
+        """Remove this instance from the server per `opts`, then DELETE the manager
+        record. Server-side removal is best-effort: an unreachable host must never
+        block deletion of a stale record — the outcome is logged and surfaced."""
+        self.ensure_one()
+        self._check_access(GROUP_DEVOPS)
+        host = self.host_id
+        name = self.name
+        dbs = [d.strip() for d in (self.available_databases or '').splitlines()
+               if d.strip()]
+        summary = ''
+        wants_server = any(opts.get(k) for k in
+                           ('remove_service', 'remove_nginx', 'drop_database'))
+        if host and host.key_authorized and wants_server:
+            spec = {
+                'service': self.service_name or '',
+                'conf': self.conf_file or '',
+                'log': self.log_file_path or '',
+                'nginx': self.nginx_file or '',
+                'databases': dbs,
+                'remove_service': bool(opts.get('remove_service')),
+                'remove_nginx': bool(opts.get('remove_nginx')),
+                'drop_database': bool(opts.get('drop_database')),
+                'remove_filestore': bool(opts.get('remove_filestore')),
+            }
+            payload = base64.b64encode(json.dumps(spec).encode()).decode()
+            try:
+                res = host._run('decommission_instance.yml', {'spec': payload},
+                                timeout=900)
+                info = host._parse_backup_json(
+                    res.get('output'), 'ODOO_DECOMMISSION_JSON:') or {}
+                summary = json.dumps(info)
+                _logger.info("Decommissioned instance %s on %s: success=%s %s",
+                             name, host.name, res.get('success'), summary)
+            except Exception as exc:  # noqa: BLE001
+                _logger.exception("Decommission of %s failed on the server", name)
+                summary = _("server-side removal error: %s") % exc
+        # The record goes regardless — it is a broken/unused instance the operator
+        # asked to remove; a failed/omitted server step is logged above.
+        self.unlink()
+        _logger.info("Instance %s deleted from the manager.", name)
+        # Navigate back to the Instances list (the deleted record's form is gone).
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _('Instances'),
+            'res_model': 'server.stage',
+            'view_mode': 'tree,form',
+            'target': 'main',
         }
 
     # ===========================
