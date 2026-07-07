@@ -11,47 +11,46 @@
                     <field name="client_stage" invisible="1"/>
                     <field name="can_act" invisible="1"/>
                     <field name="host_backup_category" invisible="1"/>
-                    <field name="stage_type" invisible="1"/>
                     <field name="odoo_status_live" nolabel="1" readonly="1" style="font-weight: bold;"/>
                     <button name="action_check_status_now" type="object" string="Check Status"
                             class="btn-secondary" icon="fa-refresh"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), ('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
                     <button name="action_upgrade_module" string="Upgrade Module" type="object"
                             class="btn-primary" icon="fa-refresh"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), '|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_view_logs_stream" type="object" string="View Logs"
                             class="btn-primary" icon="fa-terminal"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), ('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
                     <button name="action_view_conf_file" type="object" string="View Conf File"
                             class="btn btn-primary" icon="fa-file-text"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), ('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
 
                     <button name="action_pull_code" type="object" string="Pull Code"
                             class="btn btn-primary" icon="fa-download"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), '|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_start_service" type="object" string="Start"
                             class="btn btn-success" icon="fa-play"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), '|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_stop_service" type="object" string="Stop"
                             class="btn btn-danger" icon="fa-stop"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), '|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <button name="action_restart_service" type="object" string="Restart"
                             class="btn btn-warning" icon="fa-refresh"
                             groups="odoo_server_management.group_user"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), '|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
+                            attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
                     <!-- Correct a wrong/IP domain: edit the Stage Name to the real
                          domain, then push it into the server's nginx server_name so
@@ -60,7 +59,7 @@
                             string="Sync Domain → Nginx" class="btn-secondary" icon="fa-globe"
                             groups="odoo_server_management.group_devops"
                             confirm="Overwrite this instance's nginx server_name with the Stage Name domain and reload nginx on the server?"
-                            attrs="{'invisible': ['|', ('stage_type', '=', 'database'), '|', ('op_state', '=', 'running'), ('host_backup_category', '!=', 'odex')]}"/>
+                            attrs="{'invisible': ['|', ('op_state', '=', 'running'), ('host_backup_category', '!=', 'odex')]}"/>
 
                     <!-- Permanently remove a broken/old/unused instance: the record
                          plus (optionally) its service/nginx/database on the server. -->
@@ -95,17 +94,12 @@
                             <group>
                                 <group>
                                     <field name="host_id"/>
-                                    <field name="stage_type"/>
-                                    <field name="service_name" readonly="1"
-                                           attrs="{'invisible': [('stage_type','=','database')]}"/>
-                                    <field name="odoo_version"
-                                           attrs="{'invisible': [('stage_type','=','database')]}"/>
+                                    <field name="service_name" readonly="1"/>
+                                    <field name="odoo_version"/>
                                     <field name="needs_review"/>
-                                    <field name="domain_review_needed"
-                                           attrs="{'invisible': [('stage_type','=','database')]}"/>
+                                    <field name="domain_review_needed"/>
                                     <field name="last_backup"/>
-                                    <field name="auto_stop"
-                                           attrs="{'invisible': [('stage_type','=','database')]}"/>
+                                    <field name="auto_stop"/>
                                 </group>
                                 <group>
                                     <field name="log_file_path"/>
@@ -228,7 +222,6 @@
                   decoration-warning="needs_review and not domain_review_needed and not backup_review_needed and not backup_overdue">
                 <field name="name"/>
                 <field name="host_id" groups="odoo_server_management.group_devops"/>
-                <field name="stage_type"/>
                 <field name="odoo_version"/>
                 <field name="odoo_status"/>
                 <field name="last_backup" string="Last Daily Backup"/>

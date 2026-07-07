@@ -159,12 +159,6 @@ class Stage(models.Model):
     nginx_file = fields.Char(string='Nginx File', readonly=True, groups=GROUP_DEVOPS)
     upgrade_module_path = fields.Char(string='Upgrade Module Path', groups=GROUP_DEVOPS)
     http_port = fields.Integer(string='HTTP Port', readonly=True)
-    # 'odoo' = a detected Odoo systemd instance (the default). 'database' = a plain
-    # PostgreSQL database on a DB-only server (no Odoo) — start/stop/upgrade/pull do
-    # not apply, only backup/restore.
-    stage_type = fields.Selection(
-        [('odoo', 'Odoo Instance'), ('database', 'Database')],
-        string='Type', default='odoo', readonly=True, copy=False, required=True)
     needs_review = fields.Boolean(
         string='Needs Review', default=False,
         help="Set when auto-discovery could not determine every value.",
