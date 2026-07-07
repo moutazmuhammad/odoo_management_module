@@ -1034,12 +1034,22 @@ class ServerHost(models.Model):
                                      host.name, ok, total,
                                      (" (failed: %s)" % ", ".join(failed)) if failed
                                      else "")
-                        recent = any(
-                            Storage._has_recent_object(p, max_age_hours=max_age)
-                            for p in host._backup_prefixes())
                     except Exception:
                         _logger.exception("Fallback backup failed for host %s",
                                           host.id)
+                    # A full backup can take many minutes, during which THIS cursor's
+                    # transaction snapshot stayed open while the 5-/15-min refresh
+                    # crons updated this host's stages — so committing it now would
+                    # raise `could not serialize access due to concurrent update`
+                    # and LOSE the flag update below (the uploaded objects, being
+                    # external side effects, persist regardless of this cursor).
+                    # Drop the stale snapshot and re-evaluate the bucket in a fresh
+                    # one so the flag write commits cleanly against current rows.
+                    self.env.cr.rollback()
+                    self.env.clear()
+                    recent = any(
+                        Storage._has_recent_object(p, max_age_hours=max_age)
+                        for p in host._backup_prefixes())
                 if recent:
                     vals = {'last_backup_check': now}
                     if host.backup_review_needed:
