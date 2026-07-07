@@ -58,6 +58,13 @@ class ServerHost(models.Model):
         help="Auto-stop instances on this server whose service has been running "
              "longer than the configured number of days (Settings → Auto-Stop).",
     )
+    # A plain PostgreSQL server that only holds databases (no Odoo). "Discover
+    # Databases" lists every database on it and registers each as a 'database'
+    # instance so it is backed up like any other — no Odoo service required.
+    is_db_server = fields.Boolean(
+        string='Database Server', groups=GROUP_DEVOPS, default=False,
+        help="This server only holds PostgreSQL databases (no Odoo). Use "
+             "'Discover Databases' to list and back them up.")
 
     key_authorized = fields.Boolean(string='Key Authorized', default=False, readonly=True)
     last_discovery = fields.Datetime(string='Last Discovery', readonly=True)
@@ -566,6 +573,15 @@ class ServerHost(models.Model):
         self.ensure_one()
         targets, seen = [], set()
         for st in self.stage_ids:
+            # A plain-database instance keys under the DATABASE name itself (there is
+            # no domain / http port), independent of its display name.
+            if st.stage_type == 'database':
+                for db in (st.available_databases or '').splitlines():
+                    db = db.strip()
+                    if db and db not in seen:
+                        seen.add(db)
+                        targets.append({'db': db, 'domain': db, 'port': ''})
+                continue
             name = (st.name or '').strip()
             # "<ip>:<port>" form — possibly with a disambiguating "(service)"
             # suffix on a domainless duplicate, so match the numeric port rather
@@ -1193,6 +1209,64 @@ class ServerHost(models.Model):
         title = "%s — %s" % (_("Daily backup alert"), fields.Date.today())
         Storage._post_teams(title, "\n\n".join(lines), color)
 
+    def action_discover_databases(self):
+        """DB-only server: connect over SSH, list every PostgreSQL database, and
+        register each as a 'database' instance so it is backed up like any other.
+        Marks the host as a Database Server. Runs inline (a plain `psql -l` is fast)."""
+        self.env['server.stage']._check_access(GROUP_DEVOPS)
+        self.ensure_one()
+        self._require_key()
+        res = self._run('list_all_databases.yml', timeout=120)
+        if not res.get('success'):
+            raise UserError(_("Could not list databases on '%s' over SSH:\n%s") % (
+                self.name, (res.get('output') or '')[:800]))
+        dbs = self._parse_backup_json(res.get('output'), 'ODOO_ALLDBS_JSON:')
+        if dbs is None:
+            raise UserError(_("Could not read the database list from '%s'. Is "
+                              "PostgreSQL running and reachable as the postgres "
+                              "user?") % self.name)
+        n = self._sync_db_stages(dbs)
+        self.sudo().write({'is_db_server': True,
+                           'last_discovery': fields.Datetime.now()})
+        return {'type': 'ir.actions.client', 'tag': 'reload'}
+
+    def _sync_db_stages(self, dbs):
+        """Create/update one 'database' instance per PostgreSQL database on this
+        DB-server, and prune database-instances whose database no longer exists.
+        Never touches Odoo-instance stages."""
+        self.ensure_one()
+        Stage = self.env['server.stage'].sudo()
+        SYS = {'postgres', 'template0', 'template1', 'defaultdb'}
+        seen, used = set(), set()
+        for db in (dbs or []):
+            db = (db or '').strip()
+            if not db or db in SYS or db in seen:
+                continue
+            seen.add(db)
+            existing = Stage.search([('host_id', '=', self.id),
+                                     ('stage_type', '=', 'database'),
+                                     ('available_databases', '=', db)], limit=1)
+            vals = {
+                'host_id': self.id, 'stage_type': 'database',
+                'service_name': False, 'available_databases': db,
+                'databases_updated': fields.Datetime.now(),
+                'needs_review': False, 'domain_review_needed': False,
+            }
+            if existing:
+                existing.with_context(from_discovery=True).write(vals)
+                used.add(existing.name)
+            else:
+                base = '%s @ %s' % (db, self.name)
+                vals['name'] = self._unique_stage_name(base, 'db-%s' % db, used)
+                used.add(vals['name'])
+                Stage.with_context(from_discovery=True).create(vals)
+        stale = self.stage_ids.filtered(
+            lambda s: s.stage_type == 'database'
+            and (s.available_databases or '').strip() not in seen)
+        if stale:
+            stale.sudo().unlink()
+        return len(seen)
+
     def action_discover(self):
         """Detect every Odoo service on the host and sync stages — in the BACKGROUND.
 
@@ -1528,7 +1602,9 @@ class ServerHost(models.Model):
         # discovery actually returned services, so a failed scan never wipes data.
         removed = 0
         if seen_services:
-            stale = self.stage_ids.filtered(lambda s: s.service_name not in seen_services)
+            stale = self.stage_ids.filtered(
+                lambda s: s.stage_type == 'odoo'
+                and s.service_name not in seen_services)
             removed = len(stale)
             if stale:
                 _logger.info("Discovery on host %s pruned %s removed instance(s): %s",

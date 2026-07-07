@@ -15,6 +15,12 @@
                             icon="fa-search"
                             groups="odoo_server_management.group_devops"
                             attrs="{'invisible': [('op_state', '=', 'running')]}"/>
+                    <button name="action_discover_databases" type="object"
+                            string="Discover Databases" class="btn-primary"
+                            icon="fa-database"
+                            groups="odoo_server_management.group_devops"
+                            confirm="List every PostgreSQL database on this server and register each for backup? Use this for a plain database server (no Odoo)."
+                            attrs="{'invisible': [('op_state', '=', 'running')]}"/>
                     <button name="action_open_terminal" type="object"
                             string="Open Terminal" class="btn-dark" icon="fa-terminal"
                             groups="odoo_server_management.group_devops"/>
@@ -50,6 +56,8 @@
                             <field name="instance_count"/>
                             <field name="last_discovery"/>
                             <field name="devops_only" widget="boolean_toggle"
+                                   groups="odoo_server_management.group_devops"/>
+                            <field name="is_db_server" widget="boolean_toggle"
                                    groups="odoo_server_management.group_devops"/>
                         </group>
                         <group string="Backups">
