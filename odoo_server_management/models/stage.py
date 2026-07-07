@@ -1278,8 +1278,8 @@ class Stage(models.Model):
     def action_delete_instance(self):
         """Open the confirmation dialog to permanently remove this (broken/old/unused)
         instance — the manager record plus, optionally, its service/nginx/db on the
-        server. Destructive → DevOps/Admin only."""
-        self._check_access(GROUP_DEVOPS)
+        server. Destructive → Administrator only."""
+        self._check_access(GROUP_ADMIN)
         self.ensure_one()
         return {
             'name': _('Delete Instance'),
@@ -1295,7 +1295,7 @@ class Stage(models.Model):
         record. Server-side removal is best-effort: an unreachable host must never
         block deletion of a stale record — the outcome is logged and surfaced."""
         self.ensure_one()
-        self._check_access(GROUP_DEVOPS)
+        self._check_access(GROUP_ADMIN)
         host = self.host_id
         name = self.name
         dbs = [d.strip() for d in (self.available_databases or '').splitlines()

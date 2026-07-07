@@ -52,20 +52,12 @@
                             groups="odoo_server_management.group_user"
                             attrs="{'invisible': ['|', ('can_act', '=', False), ('op_state', '=', 'running')]}"/>
 
-                    <!-- Correct a wrong/IP domain: edit the Stage Name to the real
-                         domain, then push it into the server's nginx server_name so
-                         the next Discover keeps this same stage. -->
-                    <button name="action_sync_domain_to_nginx" type="object"
-                            string="Sync Domain → Nginx" class="btn-secondary" icon="fa-globe"
-                            groups="odoo_server_management.group_devops"
-                            confirm="Overwrite this instance's nginx server_name with the Stage Name domain and reload nginx on the server?"
-                            attrs="{'invisible': ['|', ('op_state', '=', 'running'), ('host_backup_category', '!=', 'odex')]}"/>
-
                     <!-- Permanently remove a broken/old/unused instance: the record
-                         plus (optionally) its service/nginx/database on the server. -->
+                         plus (optionally) its service/nginx/database on the server.
+                         Administrator only. -->
                     <button name="action_delete_instance" type="object"
                             string="Delete Instance" class="btn-danger" icon="fa-trash"
-                            groups="odoo_server_management.group_devops"
+                            groups="odoo_server_management.group_admin"
                             attrs="{'invisible': [('op_state', '=', 'running')]}"/>
                 </header>
 
@@ -127,11 +119,10 @@
                             <div class="alert alert-info" role="alert"
                                  attrs="{'invisible': [('domain_missing', '=', False)]}">
                                 <strong>🌐 This instance has no domain.</strong>
-                                It is reached by <b>&lt;ip&gt;:&lt;port&gt;</b>. Please set its
-                                domain in the <b>Stage Name</b> above, press
-                                <b>Sync Domain → Nginx</b>, then run <b>Discover</b> again so the
-                                instance works correctly — its daily backup then moves under a
-                                folder named after the domain.
+                                It is reached by <b>&lt;ip&gt;:&lt;port&gt;</b>. Give it a domain
+                                by adding a <b>server_name</b> to its nginx site on the server,
+                                then run <b>Discover</b> again so the instance works correctly —
+                                its daily backup then moves under a folder named after the domain.
                             </div>
                             <div class="alert alert-info" role="alert"
                                  attrs="{'invisible': [('overridden_fields', '=', False)]}">
@@ -248,7 +239,7 @@
                         groups="odoo_server_management.group_user"/>
                 <button name="action_delete_instance" type="object"
                         string="Delete Instance" icon="fa-trash"
-                        groups="odoo_server_management.group_devops"/>
+                        groups="odoo_server_management.group_admin"/>
             </tree>
         </field>
     </record>

@@ -31,5 +31,4 @@ access_view_conf_wizard_devops,server.view.conf.wizard.devops,model_server_view_
 access_pull_wizard_devops,server.pull.wizard.devops,model_server_pull_wizard,odoo_server_management.group_devops,1,1,1,1
 access_upgrade_wizard_devops,server.upgrade.module.wizard.devops,model_server_upgrade_module_wizard,odoo_server_management.group_devops,1,1,1,1
 access_backup_wizard_devops,server.backup.database.wizard.devops,model_server_backup_database_wizard,odoo_server_management.group_devops,1,1,1,1
-access_stage_delete_wizard_devops,server.stage.delete.wizard.devops,model_server_stage_delete_wizard,odoo_server_management.group_devops,1,1,1,1
 access_stage_delete_wizard_admin,server.stage.delete.wizard.admin,model_server_stage_delete_wizard,odoo_server_management.group_admin,1,1,1,1
