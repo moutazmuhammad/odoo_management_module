@@ -119,6 +119,9 @@ class ServerHost(models.Model):
         string='Instance Needs Review', compute='_compute_stage_review_needed',
         help="Any detected instance on this server is flagged for review "
              "(discovery could not resolve it, or its backup is missing).")
+    domain_review_needed = fields.Boolean(
+        string='Domain Needs Review', compute='_compute_domain_review_needed',
+        help="Any instance on this server has an unresolved nginx domain.")
     # LIVE "did this server take a daily backup?" indicator: True when a server
     # that is expected to back up has no successful backup within the daily window
     # (server.backup.max_age_hours, ~a day). Recomputed on read so the Servers list
@@ -162,6 +165,11 @@ class ServerHost(models.Model):
     def _compute_stage_review_needed(self):
         for host in self:
             host.stage_review_needed = any(host.stage_ids.mapped('needs_review'))
+
+    @api.depends('stage_ids.domain_review_needed')
+    def _compute_domain_review_needed(self):
+        for host in self:
+            host.domain_review_needed = any(host.stage_ids.mapped('domain_review_needed'))
 
     @api.model
     def _backup_max_age_hours(self):
@@ -1433,6 +1441,10 @@ class ServerHost(models.Model):
             # Flag the stage when the name source is not valid — a malformed
             # domain, a bad/missing IP or port, or neither could be determined.
             name_reason = self._invalid_name_reason(domain, self.ip, pub_port)
+            # A DOMAIN-specific review: the port is fronted by several domains, or a
+            # domain WAS detected but is not a valid FQDN (a domainless ip:port with a
+            # bad port is a port issue, not a domain one).
+            domain_review = domain_ambiguous or bool(domain and name_reason)
             if domain:
                 stage_name = domain
             elif pub_port:
@@ -1457,6 +1469,7 @@ class ServerHost(models.Model):
                 'odoo_user': inst.get('odoo_user') or '',
                 'http_port': int(inst['http_port']) if str(inst.get('http_port') or '').isdigit() else 0,
                 'needs_review': bool(missing or domain_ambiguous or name_reason),
+                'domain_review_needed': domain_review,
                 'review_reason': self._build_review_reason(
                     missing, domain_ambiguous, domain, domain_candidates, name_reason),
             }
