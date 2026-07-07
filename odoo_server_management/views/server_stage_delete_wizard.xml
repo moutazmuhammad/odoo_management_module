@@ -1,0 +1,39 @@
+<odoo>
+  <record id="view_server_stage_delete_wizard_form" model="ir.ui.view">
+      <field name="name">server.stage.delete.wizard.form</field>
+      <field name="model">server.stage.delete.wizard</field>
+      <field name="arch" type="xml">
+          <form string="Delete Instance">
+              <field name="stage_id" invisible="1"/>
+              <div class="alert alert-danger" role="alert">
+                  <strong>⚠ Permanently delete this instance.</strong>
+                  This removes the instance record from the manager and — for the
+                  options ticked below — its data from the server. It cannot be undone.
+              </div>
+              <group>
+                  <field name="stage_name"/>
+                  <field name="host_name"/>
+                  <field name="service_name"/>
+                  <field name="databases"/>
+              </group>
+              <group string="Also remove from the server">
+                  <field name="remove_service"/>
+                  <field name="remove_nginx"/>
+                  <field name="drop_database"/>
+                  <field name="remove_filestore"
+                         attrs="{'invisible': [('drop_database','=',False)]}"/>
+              </group>
+              <group>
+                  <field name="confirm"
+                         placeholder="Type the instance name exactly to confirm"/>
+              </group>
+              <footer>
+                  <button string="Delete Instance" type="object" name="action_delete"
+                          class="btn-danger"
+                          confirm="This permanently deletes the instance record and the data you ticked (including any database if selected). Continue?"/>
+                  <button string="Cancel" class="btn-secondary" special="cancel"/>
+              </footer>
+          </form>
+      </field>
+  </record>
+</odoo>

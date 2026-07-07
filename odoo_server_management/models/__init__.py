@@ -8,5 +8,6 @@ from . import pull_code_wizard
 from . import view_conf_wizard
 from . import module_upgrade_wizard
 from . import server_backup_database_wizard
+from . import server_stage_delete_wizard
 from . import github_settings
 from . import res_users

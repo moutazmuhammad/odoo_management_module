@@ -1,0 +1,20 @@
+---
+# Permanently remove ONE Odoo instance from a managed server: its systemd unit,
+# conf and log (always), and — only when explicitly requested — its nginx vhost,
+# database(s) and filestore. Logic lives in files/decommission.py (run via the
+# `script` module) which self-escalates with passwordless sudo. Shared source
+# trees / addons / virtualenvs are NEVER touched.
+- hosts: all
+  gather_facts: no
+  become: no
+  tasks:
+    - name: Decommission instance
+      script: files/decommission.py {{ spec | quote }}
+      args:
+        executable: python3
+      register: decom_out
+      changed_when: true
+
+    - name: Emit decommission result
+      debug:
+        msg: "{{ decom_out.stdout }}"
