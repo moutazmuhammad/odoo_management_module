@@ -176,10 +176,11 @@ class ServerHost(models.Model):
         for host in self:
             host.stage_review_needed = any(host.stage_ids.mapped('needs_review'))
 
-    @api.depends('stage_ids.domain_review_needed')
+    @api.depends('stage_ids.domain_review_needed', 'stage_ids.domain_missing')
     def _compute_domain_review_needed(self):
         for host in self:
-            host.domain_review_needed = any(host.stage_ids.mapped('domain_review_needed'))
+            host.domain_review_needed = any(
+                s.domain_review_needed or s.domain_missing for s in host.stage_ids)
 
     @api.model
     def _backup_max_age_hours(self):

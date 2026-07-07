@@ -91,12 +91,13 @@
                             <field name="stage_ids">
                                 <tree editable="bottom" create="false" delete="false"
                                       decoration-danger="backup_review_needed or backup_overdue"
-                                      decoration-info="domain_review_needed and not backup_review_needed and not backup_overdue"
-                                      decoration-warning="needs_review and not domain_review_needed and not backup_review_needed and not backup_overdue">
+                                      decoration-info="(domain_review_needed or domain_missing) and not backup_review_needed and not backup_overdue"
+                                      decoration-warning="needs_review and not domain_review_needed and not domain_missing and not backup_review_needed and not backup_overdue">
                                     <field name="service_name" readonly="1"/>
                                     <field name="odoo_version" readonly="1"/>
                                     <field name="last_backup" string="Last Daily Backup" readonly="1"/>
                                     <field name="backup_review_needed" string="Backup Missing" readonly="1"/>
+                                    <field name="domain_missing" string="No Domain" readonly="1"/>
                                     <field name="domain_review_needed" string="Domain Review" readonly="1"/>
                                     <field name="needs_review" readonly="1"/>
                                     <field name="odoo_status" readonly="1"/>

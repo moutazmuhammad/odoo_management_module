@@ -123,6 +123,16 @@
                                 <field name="review_reason" readonly="1" nolabel="1"
                                        attrs="{'invisible': [('review_reason', '=', False)]}"/>
                             </div>
+                            <field name="domain_missing" invisible="1"/>
+                            <div class="alert alert-info" role="alert"
+                                 attrs="{'invisible': [('domain_missing', '=', False)]}">
+                                <strong>🌐 This instance has no domain.</strong>
+                                It is reached by <b>&lt;ip&gt;:&lt;port&gt;</b>. Please set its
+                                domain in the <b>Stage Name</b> above, press
+                                <b>Sync Domain → Nginx</b>, then run <b>Discover</b> again so the
+                                instance works correctly — its daily backup then moves under a
+                                folder named after the domain.
+                            </div>
                             <div class="alert alert-info" role="alert"
                                  attrs="{'invisible': [('overridden_fields', '=', False)]}">
                                 <strong>🔒 Manual overrides active.</strong>
@@ -218,14 +228,15 @@
         <field name="arch" type="xml">
             <tree string="Stages" js_class="server_stage_list"
                   decoration-danger="backup_review_needed or backup_overdue"
-                  decoration-info="domain_review_needed and not backup_review_needed and not backup_overdue"
-                  decoration-warning="needs_review and not domain_review_needed and not backup_review_needed and not backup_overdue">
+                  decoration-info="(domain_review_needed or domain_missing) and not backup_review_needed and not backup_overdue"
+                  decoration-warning="needs_review and not domain_review_needed and not domain_missing and not backup_review_needed and not backup_overdue">
                 <field name="name"/>
                 <field name="host_id" groups="odoo_server_management.group_devops"/>
                 <field name="odoo_version"/>
                 <field name="odoo_status"/>
                 <field name="last_backup" string="Last Daily Backup"/>
                 <field name="backup_review_needed" string="Backup Missing" readonly="1"/>
+                <field name="domain_missing" string="No Domain" readonly="1"/>
                 <field name="domain_review_needed" string="Domain Review" readonly="1"/>
                 <field name="needs_review" readonly="1"/>
                 <field name="client_stage" widget="boolean_toggle" readonly="1"
@@ -254,6 +265,7 @@
                 <separator/>
                 <filter string="Missed Daily Backup" name="backup_overdue" domain="[('backup_overdue', '=', True)]"/>
                 <filter string="Backup Missing" name="backup_missing" domain="[('backup_review_needed', '=', True)]"/>
+                <filter string="No Domain" name="domain_missing" domain="[('domain_missing', '=', True)]"/>
                 <filter string="Domain Needs Review" name="domain_review" domain="[('domain_review_needed', '=', True)]"/>
                 <filter string="Needs Review" name="needs_review" domain="[('needs_review', '=', True)]"/>
                 <group expand="0" string="Group By">
