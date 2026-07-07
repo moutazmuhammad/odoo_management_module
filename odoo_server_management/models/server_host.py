@@ -5,6 +5,7 @@ import math
 import time
 import base64
 import logging
+from datetime import timedelta
 
 import psycopg2
 from psycopg2 import errorcodes
@@ -118,6 +119,14 @@ class ServerHost(models.Model):
         string='Instance Needs Review', compute='_compute_stage_review_needed',
         help="Any detected instance on this server is flagged for review "
              "(discovery could not resolve it, or its backup is missing).")
+    # LIVE "did this server take a daily backup?" indicator: True when a server
+    # that is expected to back up has no successful backup within the daily window
+    # (server.backup.max_age_hours, ~a day). Recomputed on read so the Servers list
+    # shows it immediately, without waiting for the 08:00 monitor cron.
+    backup_overdue = fields.Boolean(
+        string='Missed Daily Backup', compute='_compute_backup_overdue',
+        search='_search_backup_overdue',
+        help="This server has taken no successful backup in the last day.")
 
     _sql_constraints = [
         ('unique_host_ip', 'unique(ip)', 'A host with this IP already exists!'),
@@ -153,6 +162,43 @@ class ServerHost(models.Model):
     def _compute_stage_review_needed(self):
         for host in self:
             host.stage_review_needed = any(host.stage_ids.mapped('needs_review'))
+
+    @api.model
+    def _backup_max_age_hours(self):
+        """Daily-backup freshness window (hours). A server with no successful backup
+        newer than this is 'overdue' — the daily monitor also uses it to decide when
+        to run a fallback backup. Floored at 24h so a normal same-day run is never
+        flagged. Default ~a day (28h) so a missed nightly run is caught next morning."""
+        ICP = self.env['ir.config_parameter'].sudo()
+        try:
+            hours = int(ICP.get_param('server.backup.max_age_hours', default='28'))
+        except (TypeError, ValueError):
+            hours = 28
+        return max(24, hours)
+
+    def _expects_backup(self):
+        """True if this server should be producing daily backups (it is reachable
+        and has at least one database/instance to back up). DB-only hosts and
+        not-yet-authorized hosts are never counted as 'overdue'."""
+        self.ensure_one()
+        return bool(self.key_authorized and (self.stage_ids or self.backup_extra_dbs))
+
+    @api.depends('last_backup', 'key_authorized', 'stage_ids', 'backup_extra_dbs')
+    def _compute_backup_overdue(self):
+        cutoff = fields.Datetime.now() - timedelta(hours=self._backup_max_age_hours())
+        for host in self:
+            host.backup_overdue = host._expects_backup() and (
+                not host.last_backup or host.last_backup < cutoff)
+
+    def _search_backup_overdue(self, operator, value):
+        """Make the 'Missed Daily Backup' filter work: overdue = expected to back up
+        (authorized + has instances) AND last_backup missing or older than the window."""
+        cutoff = fields.Datetime.now() - timedelta(hours=self._backup_max_age_hours())
+        overdue = self.search([('key_authorized', '=', True),
+                               ('stage_ids', '!=', False)]).filtered(
+            lambda h: not h.last_backup or h.last_backup < cutoff)
+        want_overdue = (operator == '=') == bool(value)
+        return [('id', 'in' if want_overdue else 'not in', overdue.ids)]
 
     @api.constrains('ip')
     def _check_ip(self):
@@ -1013,12 +1059,10 @@ class ServerHost(models.Model):
         Storage = self.env['server.backup.storage']
         if not Storage._keys_set():
             return
-        ICP = self.env['ir.config_parameter'].sudo()
-        try:
-            max_age = int(ICP.get_param('server.backup.max_age_hours', default='48'))
-        except (TypeError, ValueError):
-            max_age = 48
-        max_age = max(24, max_age)          # never alert before a full day passes
+        # Daily window (floored at 24h): a server with no backup newer than this has
+        # missed its daily backup, so we run a fallback and — if that still leaves it
+        # without one — flag it. Tighter than the old 48h so a MISSED DAY is caught.
+        max_age = self._backup_max_age_hours()
         now = fields.Datetime.now()
         for host in self.search([('key_authorized', '=', True)]):
             try:
@@ -1068,6 +1112,15 @@ class ServerHost(models.Model):
                         for p in host._backup_prefixes())
                 if recent:
                     vals = {'last_backup_check': now}
+                    # Keep last_backup meaningful for the "missed daily backup"
+                    # indicator: the bucket has a fresh backup, so if last_backup is
+                    # stale — e.g. it came from the manager fallback (whose in-txn
+                    # stamp was rolled back to avoid a serialization failure), or the
+                    # host's agent doesn't report back — record that a backup exists
+                    # now, so the server isn't shown as overdue while it IS covered.
+                    if not host.last_backup or host.last_backup < (
+                            now - timedelta(hours=max_age)):
+                        vals['last_backup'] = now
                     if host.backup_review_needed:
                         vals.update({'backup_review_needed': False,
                                      'backup_review_reason': False})
@@ -1090,6 +1143,45 @@ class ServerHost(models.Model):
             except Exception:
                 self.env.cr.rollback()
                 _logger.exception("Backup verify failed for host %s", host.id)
+        # One consolidated Teams alert for everything that needs attention today
+        # (servers still without a backup + instances flagged for review). Sent once
+        # per daily run so the channel is a governed digest, not per-host spam.
+        try:
+            self._alert_backup_digest()
+        except Exception:
+            _logger.exception("Backup alert digest failed")
+
+    @api.model
+    def _alert_backup_digest(self):
+        """Send ONE Teams alert summarising what needs attention: servers with no
+        daily backup, and instances flagged for review. No-op when nothing is wrong
+        or no webhook is configured (so a healthy day stays silent)."""
+        Storage = self.env['server.backup.storage']
+        if not Storage._teams_webhook():
+            return
+        missing = self.search([('backup_review_needed', '=', True)])
+        review = self.env['server.stage'].search([
+            ('needs_review', '=', True),
+            ('host_id.backup_review_needed', '=', False)])
+        if not missing and not review:
+            return
+        lines = []
+        if missing:
+            lines.append("**🔴 Servers with NO daily backup (%d)**" % len(missing))
+            for h in missing:
+                why = next((ln for ln in (h.backup_review_reason or '').splitlines()
+                            if ln.strip()), _("no recent backup in the bucket"))
+                lines.append("• **%s** (%s) — %s" % (h.name, h.ip or '?', why.strip()))
+        if review:
+            lines.append("**🟠 Instances needing review (%d)**" % len(review))
+            for s in review:
+                why = next((ln for ln in (s.review_reason or '').splitlines()
+                            if ln.strip()), _("flagged for review"))
+                lines.append("• **%s** on %s — %s" % (
+                    s.name, s.host_id.name, why.strip()))
+        color = "D40000" if missing else "E8A400"
+        title = "%s — %s" % (_("Server backup alert"), fields.Date.today())
+        Storage._post_teams(title, "\n\n".join(lines), color)
 
     def action_discover(self):
         """Detect every Odoo service on the host and sync stages — in the BACKGROUND.

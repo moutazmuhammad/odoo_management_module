@@ -42,6 +42,7 @@
                                placeholder="(optional) https://fra1.digitaloceanspaces.com"/>
                         <field name="backup_prefix" placeholder="(optional) folder prefix"/>
                         <field name="backup_retention_days"/>
+                        <field name="backup_max_age_hours"/>
                         <field name="backup_signed_url_ttl"/>
                         <field name="backup_agent_manager_url"
                                placeholder="(optional) http://MANAGER-IP  — for self-backup agents"/>
@@ -61,6 +62,19 @@
                             <button string="Test Storage" type="object"
                                     name="action_test_backup_storage"
                                     class="btn-link" icon="fa-plug"/>
+                        </div>
+                    </group>
+                    <group string="Alerts (Microsoft Teams)">
+                        <field name="alerts_teams_webhook"
+                               placeholder="https://outlook.office.com/webhook/... (Teams Incoming Webhook)"/>
+                        <div colspan="2" class="text-muted" style="font-size:12px;">
+                            When set, the daily backup monitor (08:00) posts a single
+                            digest to this Teams channel listing every server that has
+                            <b>no daily backup</b> and every instance <b>needing review</b>.
+                            A healthy day stays silent.
+                            <button string="Send Test Alert" type="object"
+                                    name="action_test_teams_alert"
+                                    class="btn-link" icon="fa-paper-plane"/>
                         </div>
                     </group>
                     <group string="Auto-Stop Instances">

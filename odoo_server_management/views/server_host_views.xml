@@ -105,17 +105,19 @@
         <field name="model">server.host</field>
         <field name="arch" type="xml">
             <tree string="Server Hosts"
-                  decoration-danger="backup_review_needed"
-                  decoration-warning="stage_review_needed and not backup_review_needed">
+                  decoration-danger="backup_review_needed or backup_overdue"
+                  decoration-warning="stage_review_needed and not backup_review_needed and not backup_overdue">
                 <field name="name"/>
                 <field name="ip"/>
                 <field name="backup_category"/>
                 <field name="instance_count"/>
+                <field name="last_backup" string="Last Daily Backup"/>
                 <field name="key_authorized" widget="boolean_toggle" readonly="1"/>
                 <field name="backup_review_needed" string="Backup Review"
                        widget="boolean_toggle" readonly="1"/>
-                <!-- loaded for the row decoration only -->
+                <!-- loaded for the row decorations only -->
                 <field name="stage_review_needed" invisible="1"/>
+                <field name="backup_overdue" invisible="1"/>
             </tree>
         </field>
     </record>
@@ -131,6 +133,8 @@
                 <filter name="cat_odex" string="Odex" domain="[('backup_category','=','odex')]"/>
                 <filter name="cat_erp" string="ERP" domain="[('backup_category','=','erp')]"/>
                 <separator/>
+                <filter name="backup_overdue" string="Missed Daily Backup"
+                        domain="[('backup_overdue','=',True)]"/>
                 <filter name="backup_review" string="Backup Needs Review"
                         domain="[('backup_review_needed','=',True)]"/>
                 <group expand="1" string="Group By">

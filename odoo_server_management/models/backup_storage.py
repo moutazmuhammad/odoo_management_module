@@ -63,6 +63,42 @@ class BackupStorage(models.AbstractModel):
     def _retention_days(self):
         return self._int_cfg('server.backup.retention_days', 7)
 
+    # ------------------------------------------------------------------
+    # Alerting (Microsoft Teams incoming webhook)
+    # ------------------------------------------------------------------
+    @api.model
+    def _teams_webhook(self):
+        """The Teams 'Incoming Webhook' URL to post alerts to (empty = disabled)."""
+        return (self._cfg('server.alerts.teams_webhook') or '').strip()
+
+    @api.model
+    def _post_teams(self, title, text, color='D40000'):
+        """POST a MessageCard to the configured Teams webhook. Best-effort: any
+        network/HTTP error is logged, never raised — an alert must never break the
+        cron that triggers it. Returns True on a 2xx response."""
+        url = self._teams_webhook()
+        if not url:
+            return False
+        import requests
+        card = {
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "summary": title,
+            "themeColor": color,
+            "title": title,
+            "text": text,
+        }
+        try:
+            resp = requests.post(url, json=card, timeout=15)
+            if resp.status_code >= 300:
+                _logger.warning("Teams webhook returned HTTP %s: %s",
+                                resp.status_code, (resp.text or '')[:200])
+                return False
+            return True
+        except Exception:  # noqa: BLE001
+            _logger.exception("Failed to post Teams alert")
+            return False
+
     @api.model
     def _signed_url_ttl(self):
         return self._int_cfg('server.backup.signed_url_ttl', 3600)

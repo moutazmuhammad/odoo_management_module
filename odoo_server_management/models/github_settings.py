@@ -70,6 +70,17 @@ class GithubSettings(models.TransientModel):
                                 help="Optional folder prefixed to every object key.")
     backup_retention_days = fields.Integer(string="Retention (days)", default=7)
     backup_signed_url_ttl = fields.Integer(string="Download Link TTL (seconds)", default=3600)
+    backup_max_age_hours = fields.Integer(
+        string="Daily Backup Max Age (hours)", default=28,
+        help="A server with no successful backup newer than this has MISSED its "
+             "daily backup: the monitor runs a fallback backup and, if that still "
+             "leaves it without one, flags it (red) and alerts. Floored at 24h.")
+    # Microsoft Teams incoming-webhook URL for governance alerts.
+    alerts_teams_webhook = fields.Char(
+        string="Teams Alerts Webhook URL",
+        help="Microsoft Teams 'Incoming Webhook' URL. When set, the daily backup "
+             "monitor posts an alert listing every server with no daily backup and "
+             "every instance needing review. Leave empty to disable Teams alerts.")
     backup_agent_manager_url = fields.Char(
         string="Agent Manager URL",
         help="URL the per-server backup agents use to reach THIS manager. Leave "
@@ -123,6 +134,8 @@ class GithubSettings(models.TransientModel):
             backup_prefix=IrConfig.get_param('server.backup.prefix', default=''),
             backup_retention_days=int(IrConfig.get_param('server.backup.retention_days', default='7') or 7),
             backup_signed_url_ttl=int(IrConfig.get_param('server.backup.signed_url_ttl', default='3600') or 3600),
+            backup_max_age_hours=int(IrConfig.get_param('server.backup.max_age_hours', default='28') or 28),
+            alerts_teams_webhook=IrConfig.get_param('server.alerts.teams_webhook', default=''),
             backup_agent_manager_url=IrConfig.get_param('server.backup.agent_manager_url', default=''),
             # Secrets are write-only — never echo them back.
             backup_access_key='',
@@ -172,6 +185,8 @@ class GithubSettings(models.TransientModel):
         IrConfig.set_param('server.backup.prefix', (self.backup_prefix or '').strip())
         IrConfig.set_param('server.backup.retention_days', str(self.backup_retention_days or 7))
         IrConfig.set_param('server.backup.signed_url_ttl', str(self.backup_signed_url_ttl or 3600))
+        IrConfig.set_param('server.backup.max_age_hours', str(self.backup_max_age_hours or 28))
+        IrConfig.set_param('server.alerts.teams_webhook', (self.alerts_teams_webhook or '').strip())
         IrConfig.set_param('server.backup.agent_manager_url', (self.backup_agent_manager_url or '').strip())
         # Backup credentials: only update when a new value was entered (blank = keep).
         if self.backup_access_key:
@@ -195,5 +210,28 @@ class GithubSettings(models.TransientModel):
         """Save the form, then verify the global Space is reachable."""
         self.set_values()
         return self.env['server.backup.storage'].action_test_storage()
+
+    def action_test_teams_alert(self):
+        """Save the form, then post a test card to the configured Teams webhook so
+        the admin can confirm alerts will actually arrive in the channel."""
+        self.set_values()
+        Storage = self.env['server.backup.storage']
+        if not Storage._teams_webhook():
+            raise exceptions.UserError(_("Enter a Teams webhook URL first, then save."))
+        ok = Storage._post_teams(
+            _("✅ Test alert — Server Management"),
+            _("This is a test. Daily-backup and review alerts will be posted here."),
+            color="2DA44E")
+        return {
+            'type': 'ir.actions.client', 'tag': 'display_notification',
+            'params': {
+                'type': 'success' if ok else 'warning',
+                'title': _("Teams Alert"),
+                'message': (_("Test alert sent — check your Teams channel.") if ok else
+                            _("Could not post to the webhook. Check the URL "
+                              "(details in the server log).")),
+                'sticky': False,
+            },
+        }
 
 
