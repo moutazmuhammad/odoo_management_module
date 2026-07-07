@@ -1016,6 +1016,30 @@ class ServerHost(models.Model):
                     continue
                 recent = any(Storage._has_recent_object(p, max_age_hours=max_age)
                              for p in host._backup_prefixes())
+                if not recent:
+                    # Self-heal: a host's OWN backup agent/cron can silently stop
+                    # (e.g. its local /etc/cron.d job never fires, or the host was
+                    # only just enrolled after tonight's run) — leaving it with no
+                    # fresh backup even though the manager can still reach every one
+                    # of its databases over SSH. Rather than only flag it, take the
+                    # backup NOW from the manager and re-check the bucket. This turns
+                    # the monitor into a safety net that GUARANTEES a daily backup for
+                    # every server, regardless of why its local agent fell behind.
+                    try:
+                        _logger.warning(
+                            "Backup monitor: host %s has no recent backup — running "
+                            "a manager-driven fallback backup.", host.name)
+                        ok, total, failed = host._run_daily_backup()
+                        _logger.info("Fallback backup on host %s: %s/%s uploaded%s",
+                                     host.name, ok, total,
+                                     (" (failed: %s)" % ", ".join(failed)) if failed
+                                     else "")
+                        recent = any(
+                            Storage._has_recent_object(p, max_age_hours=max_age)
+                            for p in host._backup_prefixes())
+                    except Exception:
+                        _logger.exception("Fallback backup failed for host %s",
+                                          host.id)
                 if recent:
                     vals = {'last_backup_check': now}
                     if host.backup_review_needed:
