@@ -89,9 +89,15 @@ done = {'service': None, 'files': [], 'nginx': None, 'databases': {},
         'filestore': [], 'errors': []}
 
 svc = (spec.get('service') or '').strip()
+# A systemd unit name never contains a path separator; requiring this closes any
+# '..'/'/' traversal through the interpolated 'rm' paths below (defence in depth on
+# top of the per-path dir checks).
+_SAFE_UNIT = re.compile(r'^[A-Za-z0-9:._@-]+$')
 
 # 1. The service itself: stop, disable, delete its unit file, conf and log.
-if spec.get('remove_service') and svc:
+if spec.get('remove_service') and svc and not _SAFE_UNIT.match(svc):
+    done['errors'].append('refusing to remove service with unsafe name: %r' % svc)
+elif spec.get('remove_service') and svc:
     q = shlex.quote(svc)
     sh(SUDO + 'systemctl stop %s' % q)
     sh(SUDO + 'systemctl disable %s' % q)
@@ -109,8 +115,11 @@ if spec.get('remove_service') and svc:
             ok, _o, _e = run('rm -f %s' % shlex.quote(path))
             if ok and path not in removed:
                 removed.append(path)
-    # drop-in overrides dir, if any
-    run('rm -rf %s' % shlex.quote('/etc/systemd/system/%s.service.d' % svc))
+    # drop-in overrides dir, if any (svc is _SAFE_UNIT-checked above, but keep the
+    # same dir guard the unit-file removal uses).
+    dropin = '/etc/systemd/system/%s.service.d' % svc
+    if os.path.dirname(dropin) == '/etc/systemd/system':
+        run('rm -rf %s' % shlex.quote(dropin))
     sh(SUDO + 'systemctl daemon-reload')
     sh(SUDO + 'systemctl reset-failed %s' % q)
     done['service'] = 'stopped, disabled and unit removed'
@@ -143,6 +152,11 @@ if spec.get('drop_database'):
     for db in (spec.get('databases') or []):
         db = (db or '').strip()
         if not db:
+            continue
+        # A '/' or '..' in a db name would let the filestore rm below escape the
+        # data dir — never drop/rm such a name (a real PostgreSQL/Odoo db has none).
+        if '/' in db or db in ('.', '..'):
+            done['databases'][db] = 'skipped: unsafe database name'
             continue
         term = ("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE "
                 "datname = %s AND pid <> pg_backend_pid();" % _lit(db))

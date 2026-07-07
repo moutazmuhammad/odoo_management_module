@@ -274,7 +274,9 @@ def conf_get(conf, key):
             pass
     for ln in text.splitlines():
         ln = ln.strip()
-        if ln.startswith(key) and '=' in ln:
+        # Match the WHOLE key up to its '=' (not a bare prefix, so querying
+        # 'db_host' never matches a longer 'db_host_xxx' key).
+        if re.match(r'%s\s*=' % re.escape(key), ln):
             return ln.split('=', 1)[1].strip()
     return None
 
@@ -395,11 +397,12 @@ def parse_nginx():
                     tok = tok.strip().rstrip('.')
                     # A wildcard vhost (server_name *.example.com) has no single
                     # hostname — use its BASE domain (example.com) as the canonical,
-                    # VALID name instead of the unroutable "*.example.com".
-                    if tok.startswith('*.'):
+                    # VALID name instead of the unroutable "*.example.com". Strip
+                    # every leading wildcard label ("*.*.x" -> "x").
+                    while tok.startswith('*.'):
                         tok = tok[2:]
                     if (tok and tok not in ('_', 'localhost')
-                            and not tok.startswith('$') and not tok.startswith('*')
+                            and not tok.startswith('$') and '*' not in tok
                             and not _is_ip(tok) and tok not in domains):
                         domains.append(tok)
             fd = file_domains.setdefault(path, [])

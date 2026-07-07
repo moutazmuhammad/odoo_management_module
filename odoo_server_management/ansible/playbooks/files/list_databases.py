@@ -16,7 +16,8 @@ def conf_get(conf, key):
     try:
         for ln in open(conf, errors='ignore'):
             ln = ln.strip()
-            if ln.startswith(key) and '=' in ln:
+            # Whole-key match up to '=' (so 'db_host' never matches 'db_host_xxx').
+            if re.match(r'%s\s*=' % re.escape(key), ln):
                 return ln.split('=', 1)[1].strip()
     except Exception:
         pass
