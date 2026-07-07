@@ -90,6 +90,7 @@
                                     <field name="service_name" readonly="1"/>
                                     <field name="odoo_version"/>
                                     <field name="needs_review"/>
+                                    <field name="domain_review_needed"/>
                                     <field name="last_backup"/>
                                     <field name="auto_stop"/>
                                 </group>
@@ -210,13 +211,15 @@
         <field name="arch" type="xml">
             <tree string="Stages" js_class="server_stage_list"
                   decoration-danger="backup_review_needed or backup_overdue"
-                  decoration-warning="needs_review and not backup_review_needed and not backup_overdue">
+                  decoration-info="domain_review_needed and not backup_review_needed and not backup_overdue"
+                  decoration-warning="needs_review and not domain_review_needed and not backup_review_needed and not backup_overdue">
                 <field name="name"/>
                 <field name="host_id" groups="odoo_server_management.group_devops"/>
                 <field name="odoo_version"/>
                 <field name="odoo_status"/>
                 <field name="last_backup" string="Last Daily Backup"/>
                 <field name="backup_review_needed" string="Backup Missing" readonly="1"/>
+                <field name="domain_review_needed" string="Domain Review" readonly="1"/>
                 <field name="needs_review" readonly="1"/>
                 <field name="client_stage" widget="boolean_toggle" readonly="1"
                        groups="odoo_server_management.group_devops"/>
@@ -241,6 +244,7 @@
                 <separator/>
                 <filter string="Missed Daily Backup" name="backup_overdue" domain="[('backup_overdue', '=', True)]"/>
                 <filter string="Backup Missing" name="backup_missing" domain="[('backup_review_needed', '=', True)]"/>
+                <filter string="Domain Needs Review" name="domain_review" domain="[('domain_review_needed', '=', True)]"/>
                 <filter string="Needs Review" name="needs_review" domain="[('needs_review', '=', True)]"/>
                 <group expand="0" string="Group By">
                     <filter string="Server" name="group_by_host" context="{'group_by': 'host_id'}"/>

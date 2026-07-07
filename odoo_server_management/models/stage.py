@@ -166,6 +166,15 @@ class Stage(models.Model):
         help="Explanation of why discovery flagged this instance for manual "
              "review (incomplete detection, or an ambiguous nginx domain).",
     )
+    # Specifically a DOMAIN problem (subset of needs_review): the instance's port is
+    # fronted by more than one nginx domain, or the detected domain is not a valid
+    # FQDN. Kept separate so the lists can colour "domain needs review" distinctly.
+    domain_review_needed = fields.Boolean(
+        string='Domain Needs Review', readonly=True, copy=False, default=False,
+        help="Discovery could not settle this instance's domain — its port is "
+             "fronted by several nginx domains, or the detected domain is invalid. "
+             "Pick the correct one by editing the Stage Name.",
+    )
     # ------------------------------------------------------------------
     # Per-instance daily-backup governance (each instance tracked on its own).
     # ------------------------------------------------------------------
