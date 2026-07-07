@@ -1,0 +1,18 @@
+---
+# List every PostgreSQL database on a plain DB server (no Odoo). Logic lives in
+# files/list_all_databases.py (run via the `script` module); it connects as the
+# postgres superuser over the local socket. Prints ODOO_ALLDBS_JSON:<base64 json>.
+- hosts: all
+  gather_facts: no
+  become: no
+  tasks:
+    - name: List all databases
+      script: files/list_all_databases.py
+      args:
+        executable: python3
+      register: alldbs_out
+      changed_when: false
+
+    - name: Emit database list
+      debug:
+        msg: "{{ alldbs_out.stdout }}"

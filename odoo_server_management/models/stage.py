@@ -143,7 +143,10 @@ class Stage(models.Model):
 
     # Per-instance Odoo details — auto-detected. One host may run several
     # services across several versions, so every path/version lives here.
-    service_name = fields.Char(string='Service Name', required=True)
+    # Required for Odoo instances (always set by discovery); empty for a plain
+    # 'database' instance, which has no systemd service. The status/auto-stop probes
+    # already skip stages with no service_name, so an empty one is safely ignored.
+    service_name = fields.Char(string='Service Name')
     odoo_version = fields.Char(string='Odoo Version', readonly=True)
     odoo_bin = fields.Char(string='odoo-bin Path', readonly=True, groups=GROUP_DEVOPS)
     python_bin = fields.Char(string='Python Path', readonly=True, groups=GROUP_DEVOPS)
@@ -156,6 +159,12 @@ class Stage(models.Model):
     nginx_file = fields.Char(string='Nginx File', readonly=True, groups=GROUP_DEVOPS)
     upgrade_module_path = fields.Char(string='Upgrade Module Path', groups=GROUP_DEVOPS)
     http_port = fields.Integer(string='HTTP Port', readonly=True)
+    # 'odoo' = a detected Odoo systemd instance (the default). 'database' = a plain
+    # PostgreSQL database on a DB-only server (no Odoo) — start/stop/upgrade/pull do
+    # not apply, only backup/restore.
+    stage_type = fields.Selection(
+        [('odoo', 'Odoo Instance'), ('database', 'Database')],
+        string='Type', default='odoo', readonly=True, copy=False, required=True)
     needs_review = fields.Boolean(
         string='Needs Review', default=False,
         help="Set when auto-discovery could not determine every value.",
