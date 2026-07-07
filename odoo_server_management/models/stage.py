@@ -276,12 +276,13 @@ class Stage(models.Model):
               "from the server."))
 
     service_status = fields.Boolean(string='Service Status', default=False, readonly=True)
-    # Admin-only: whether the daily auto-stop job may stop this instance (only
-    # has effect when its host's "Stop Instances" is enabled).
+    # Per-instance switch for the daily auto-stop job. Control is entirely per
+    # instance — there is no server-level gate.
     auto_stop = fields.Boolean(
         string='Auto-Stop', default=False, groups=GROUP_DEVOPS,
-        help="If the server's 'Stop Instances' is on, stop this instance once "
-             "its service has been running longer than the configured days.",
+        help="Stop this instance automatically once its service has been running "
+             "longer than the configured number of days (Settings → Auto-Stop). "
+             "Controlled per instance — no server-level switch is needed.",
     )
     # Stored (not computed-on-read): a live HTTP probe per render was the main
     # slowdown — opening a host re-probed every stage. It is now refreshed only

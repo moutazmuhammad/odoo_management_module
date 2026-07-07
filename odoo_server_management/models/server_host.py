@@ -52,12 +52,6 @@ class ServerHost(models.Model):
         string='DevOps Only', groups=GROUP_DEVOPS, default=False,
         help="Hide this server's instances from plain Developers (Servers "
              "themselves are already DevOps/Administrator only).")
-    # Admin-only: enable the daily auto-stop job for this server. Off by default.
-    auto_stop_enabled = fields.Boolean(
-        string='Stop Instances', groups=GROUP_DEVOPS, default=False,
-        help="Auto-stop instances on this server whose service has been running "
-             "longer than the configured number of days (Settings → Auto-Stop).",
-    )
     # What KIND of server this is. 'odoo' gets the full feature set (discover
     # instances, backups, agent, auto-stop, ...). 'other' is a plain server the
     # module only keeps a connection to — reachable via the web Terminal — with all
@@ -978,7 +972,8 @@ class ServerHost(models.Model):
         today = now.date()
         # Every host is enrolled automatically (no per-host setup). Hosts that run
         # their own local cron agent back themselves up — skip those here.
-        hosts = self.search([('backup_agent_enabled', '=', False)])
+        hosts = self.search([('backup_agent_enabled', '=', False),
+                             ('server_type', '=', 'odoo')])
         for host in hosts:
             # Already backed up today (e.g. a manual run, or a second tick)? Skip.
             if host.last_backup and host.last_backup.date() == today:
@@ -1089,7 +1084,8 @@ class ServerHost(models.Model):
         max_age = self._backup_max_age_hours()
         now = fields.Datetime.now()
         Stage = self.env['server.stage'].sudo()
-        for host in self.search([('key_authorized', '=', True)]):
+        for host in self.search([('key_authorized', '=', True),
+                                 ('server_type', '=', 'odoo')]):
             try:
                 stages = host.stage_ids.filtered(lambda s: s._expects_backup())
                 if not stages:
@@ -1441,7 +1437,9 @@ class ServerHost(models.Model):
             # "*.x" never yields an invalid stage name).
             def _dewild(d):
                 d = (d or '').strip().rstrip('.')
-                return d[2:] if d.startswith('*.') else d
+                while d.startswith('*.'):
+                    d = d[2:]
+                return d
             domain_candidates, _seen_dc = [], set()
             for _d in (inst.get('domain_candidates') or []):
                 _dd = _dewild(_d)

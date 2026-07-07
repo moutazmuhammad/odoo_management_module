@@ -240,7 +240,10 @@ class BackupStorage(models.AbstractModel):
                     continue
                 lm = obj['LastModified']
                 age_h = (now - lm).total_seconds() / 3600.0
-                if 0 <= age_h <= max_age_hours:
+                # No lower bound: if the object store's clock is a little ahead of
+                # ours the age is slightly negative for a JUST-uploaded backup —
+                # which is still "recent", so don't exclude it.
+                if age_h <= max_age_hours:
                     return True
             if resp.get('IsTruncated'):
                 token = resp.get('NextContinuationToken')
@@ -271,7 +274,7 @@ class BackupStorage(models.AbstractModel):
                 if not obj.get('Size'):
                     continue
                 age_h = (now - obj['LastModified']).total_seconds() / 3600.0
-                if 0 <= age_h <= max_age_hours:
+                if age_h <= max_age_hours:      # no lower bound — see _has_recent_object
                     parts = obj['Key'].split('/')
                     if len(parts) >= 2:
                         dbs.add(parts[-2])      # .../<db>/<db>_<date>.zip -> db folder
