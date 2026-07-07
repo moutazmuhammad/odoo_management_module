@@ -654,16 +654,13 @@ class Stage(models.Model):
     # ------------------------------------------------------------------
     # Per-instance backup governance helpers
     # ------------------------------------------------------------------
-    def _backup_seg(self):
-        """This instance's path segment in a backup object key — its nginx domain,
-        else `<ip>:<port>` with ':'->'-' — matching exactly how the daily backup
-        keys are built (server_host._instance_seg), so a per-instance bucket lookup
-        finds this instance's own objects."""
+    def _backup_dbs(self):
+        """The set of databases THIS instance serves (from the cached list). Backup
+        freshness is judged by these databases — a database shared with a sibling
+        instance is backed up once and counts for both."""
         self.ensure_one()
-        name = (self.name or '').strip()
-        m = re.search(r':(\d+)', name)
-        it = {'domain': '', 'port': m.group(1)} if m else {'domain': name, 'port': ''}
-        return self.host_id._instance_seg(it)
+        return {d.strip() for d in (self.available_databases or '').splitlines()
+                if d.strip()}
 
     def _expects_backup(self):
         """True if THIS instance should be producing daily backups (its host is

@@ -994,16 +994,17 @@ class ServerHost(models.Model):
                 prefixes.append(Storage._object_key([category, seg]) + '/')
         return prefixes
 
-    def _recent_backup_segs(self, max_age_hours):
-        """The set of INSTANCE path-segments on this host that have a recent backup,
-        gathered with ONE listing per host prefix (not one per instance) so a server
-        with many instances is checked cheaply. Compared against stage._backup_seg()."""
+    def _recent_backup_dbs(self, max_age_hours):
+        """The set of DATABASE names on this host that have a recent backup, gathered
+        with ONE listing per host prefix (not one per instance). Compared against each
+        instance's databases (stage._backup_dbs()) — so a database shared by two
+        instances counts as backed up for both."""
         self.ensure_one()
         Storage = self.env['server.backup.storage']
-        segs = set()
+        dbs = set()
         for prefix in self._backup_prefixes():
-            segs |= Storage._recent_segs(prefix, max_age_hours)
-        return segs
+            dbs |= Storage._recent_dbs(prefix, max_age_hours)
+        return dbs
 
     def _diagnose_backup_gap(self):
         """SSH-probe this host to explain why no recent backup exists: free disk on
@@ -1078,10 +1079,11 @@ class ServerHost(models.Model):
                                     'last_backup_check': now})
                     self.env.cr.commit()
                     continue
-                # 1. Which INSTANCES have no recent backup object of their own? (One
-                #    bucket listing per host covers every instance on it.)
-                fresh = host._recent_backup_segs(max_age)
-                stale = stages.filtered(lambda s: s._backup_seg() not in fresh)
+                # 1. Which INSTANCES have no recent backup for their database(s)? (One
+                #    bucket listing per host covers every instance; a database shared
+                #    by two instances counts as backed up for both.)
+                fresh = host._recent_backup_dbs(max_age)
+                stale = stages.filtered(lambda s: not s._backup_dbs() <= fresh)
                 if stale:
                     # Self-heal PER INSTANCE: back up exactly the stale instances'
                     # databases (still one host-batched SSH pass). A missed nightly
@@ -1106,11 +1108,11 @@ class ServerHost(models.Model):
                     self.env.clear()
                     host = self.browse(host.id)
                     stages = host.stage_ids.filtered(lambda s: s._expects_backup())
-                    fresh = host._recent_backup_segs(max_age)
+                    fresh = host._recent_backup_dbs(max_age)
                 # 2. Per-instance: stamp last_backup / set-or-clear the instance flag.
                 host_reason, still_missing = None, self.env['server.stage']
                 for s in stages:
-                    if s._backup_seg() in fresh:
+                    if s._backup_dbs() <= fresh:
                         vals = {}
                         if not s.last_backup or s.last_backup < (
                                 now - timedelta(hours=max_age)):

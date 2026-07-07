@@ -249,18 +249,19 @@ class BackupStorage(models.AbstractModel):
         return False
 
     @api.model
-    def _recent_segs(self, key_prefix, max_age_hours=28):
-        """Set of immediate child path segments under `key_prefix` that hold a recent
-        (< max_age_hours) non-empty object — so PER-INSTANCE backup freshness can be
-        checked with ONE listing per server instead of one call per instance. E.g.
-        prefix 'erp/my-server/' -> {'a.example.com', '46.1.2.3-8069', ...}."""
+    def _recent_dbs(self, key_prefix, max_age_hours=28):
+        """Set of DATABASE names under `key_prefix` that have a recent (< max_age_hours)
+        backup object. The db is the folder just above each '<db>_<date>.zip' (keys are
+        '<cat>/<server>/<instance>/<db>/<db>_<date>.zip'), so a database SHARED by two
+        instances is recognised as backed up for BOTH — and one listing per server
+        covers every instance, instead of a call per instance."""
         import datetime
         if not self._keys_set():
             return set()
         cli = self._boto_client()
         bucket = self._bucket()
         now = datetime.datetime.now(datetime.timezone.utc)
-        segs, token, plen = set(), None, len(key_prefix)
+        dbs, token = set(), None
         while True:
             kw = {'Bucket': bucket, 'Prefix': key_prefix}
             if token:
@@ -271,14 +272,14 @@ class BackupStorage(models.AbstractModel):
                     continue
                 age_h = (now - obj['LastModified']).total_seconds() / 3600.0
                 if 0 <= age_h <= max_age_hours:
-                    seg = obj['Key'][plen:].split('/', 1)[0]
-                    if seg:
-                        segs.add(seg)
+                    parts = obj['Key'].split('/')
+                    if len(parts) >= 2:
+                        dbs.add(parts[-2])      # .../<db>/<db>_<date>.zip -> db folder
             if resp.get('IsTruncated'):
                 token = resp.get('NextContinuationToken')
             else:
                 break
-        return segs
+        return dbs
 
     @api.model
     def _prune(self, key_prefix, retention_days=None):
