@@ -176,29 +176,19 @@ class ServerHost(models.Model):
             hours = 28
         return max(24, hours)
 
-    def _expects_backup(self):
-        """True if this server should be producing daily backups (it is reachable
-        and has at least one database/instance to back up). DB-only hosts and
-        not-yet-authorized hosts are never counted as 'overdue'."""
-        self.ensure_one()
-        return bool(self.key_authorized and (self.stage_ids or self.backup_extra_dbs))
-
-    @api.depends('last_backup', 'key_authorized', 'stage_ids', 'backup_extra_dbs')
+    @api.depends('stage_ids.backup_overdue')
     def _compute_backup_overdue(self):
-        cutoff = fields.Datetime.now() - timedelta(hours=self._backup_max_age_hours())
+        """Server rolls up its INSTANCES: overdue when ANY instance on it missed its
+        daily backup, so the Servers list flags the server while the Instances list
+        pinpoints which one."""
         for host in self:
-            host.backup_overdue = host._expects_backup() and (
-                not host.last_backup or host.last_backup < cutoff)
+            host.backup_overdue = any(host.stage_ids.mapped('backup_overdue'))
 
     def _search_backup_overdue(self, operator, value):
-        """Make the 'Missed Daily Backup' filter work: overdue = expected to back up
-        (authorized + has instances) AND last_backup missing or older than the window."""
-        cutoff = fields.Datetime.now() - timedelta(hours=self._backup_max_age_hours())
-        overdue = self.search([('key_authorized', '=', True),
-                               ('stage_ids', '!=', False)]).filtered(
-            lambda h: not h.last_backup or h.last_backup < cutoff)
+        stages = self.env['server.stage'].search([('backup_overdue', '=', True)])
+        host_ids = stages.mapped('host_id').ids
         want_overdue = (operator == '=') == bool(value)
-        return [('id', 'in' if want_overdue else 'not in', overdue.ids)]
+        return [('id', 'in' if want_overdue else 'not in', host_ids)]
 
     @api.constrains('ip')
     def _check_ip(self):
@@ -423,12 +413,14 @@ class ServerHost(models.Model):
 
     @api.model
     def _cron_auto_stop(self):
-        """Daily job: auto-stop stale instances on hosts that enabled it."""
+        """Daily job: auto-stop stale instances. Control is PER INSTANCE — every
+        instance whose own "Auto-Stop" is ticked is eligible, on any server (there
+        is no server-level gate). _auto_stop no-ops on hosts with no such instance."""
         days = int(self.env['ir.config_parameter'].sudo().get_param(
             'server.autostop.days') or 0)
         if days <= 0:
             return
-        for host in self.search([('auto_stop_enabled', '=', True)]):
+        for host in self.search([]):
             try:
                 stopped = host._auto_stop(days)
                 if stopped:
@@ -1002,6 +994,17 @@ class ServerHost(models.Model):
                 prefixes.append(Storage._object_key([category, seg]) + '/')
         return prefixes
 
+    def _recent_backup_segs(self, max_age_hours):
+        """The set of INSTANCE path-segments on this host that have a recent backup,
+        gathered with ONE listing per host prefix (not one per instance) so a server
+        with many instances is checked cheaply. Compared against stage._backup_seg()."""
+        self.ensure_one()
+        Storage = self.env['server.backup.storage']
+        segs = set()
+        for prefix in self._backup_prefixes():
+            segs |= Storage._recent_segs(prefix, max_age_hours)
+        return segs
+
     def _diagnose_backup_gap(self):
         """SSH-probe this host to explain why no recent backup exists: free disk on
         the scratch/backup paths, whether the agent + cron are installed, and the
@@ -1059,93 +1062,93 @@ class ServerHost(models.Model):
         Storage = self.env['server.backup.storage']
         if not Storage._keys_set():
             return
-        # Daily window (floored at 24h): a server with no backup newer than this has
-        # missed its daily backup, so we run a fallback and — if that still leaves it
-        # without one — flag it. Tighter than the old 48h so a MISSED DAY is caught.
+        # Daily window (floored at 24h): an INSTANCE with no backup newer than this
+        # has missed its daily backup, so we take a fallback of exactly that
+        # instance's database(s) and — if it still has none — flag the instance.
         max_age = self._backup_max_age_hours()
         now = fields.Datetime.now()
+        Stage = self.env['server.stage'].sudo()
         for host in self.search([('key_authorized', '=', True)]):
             try:
-                # Nothing to expect if the host has no databases to back up.
-                if not host._backup_targets():
+                stages = host.stage_ids.filtered(lambda s: s._expects_backup())
+                if not stages:
                     if host.backup_review_needed:
                         host.write({'backup_review_needed': False,
                                     'backup_review_reason': False,
                                     'last_backup_check': now})
                     self.env.cr.commit()
                     continue
-                recent = any(Storage._has_recent_object(p, max_age_hours=max_age)
-                             for p in host._backup_prefixes())
-                if not recent:
-                    # Self-heal: a host's OWN backup agent/cron can silently stop
-                    # (e.g. its local /etc/cron.d job never fires, or the host was
-                    # only just enrolled after tonight's run) — leaving it with no
-                    # fresh backup even though the manager can still reach every one
-                    # of its databases over SSH. Rather than only flag it, take the
-                    # backup NOW from the manager and re-check the bucket. This turns
-                    # the monitor into a safety net that GUARANTEES a daily backup for
-                    # every server, regardless of why its local agent fell behind.
+                # 1. Which INSTANCES have no recent backup object of their own? (One
+                #    bucket listing per host covers every instance on it.)
+                fresh = host._recent_backup_segs(max_age)
+                stale = stages.filtered(lambda s: s._backup_seg() not in fresh)
+                if stale:
+                    # Self-heal PER INSTANCE: back up exactly the stale instances'
+                    # databases (still one host-batched SSH pass). A missed nightly
+                    # run, a silently-dead local cron, or a just-enrolled host is
+                    # remediated here so every instance gets its daily backup.
+                    only = []
+                    for s in stale:
+                        only += [d.strip() for d in (s.available_databases or '').splitlines()
+                                 if d.strip()]
                     try:
-                        _logger.warning(
-                            "Backup monitor: host %s has no recent backup — running "
-                            "a manager-driven fallback backup.", host.name)
-                        ok, total, failed = host._run_daily_backup()
-                        _logger.info("Fallback backup on host %s: %s/%s uploaded%s",
-                                     host.name, ok, total,
-                                     (" (failed: %s)" % ", ".join(failed)) if failed
-                                     else "")
+                        _logger.warning("Backup monitor: host %s has %d instance(s) "
+                                        "without a daily backup — running fallback.",
+                                        host.name, len(stale))
+                        host._run_daily_backup(only_dbs=only)
                     except Exception:
-                        _logger.exception("Fallback backup failed for host %s",
-                                          host.id)
-                    # A full backup can take many minutes, during which THIS cursor's
-                    # transaction snapshot stayed open while the 5-/15-min refresh
-                    # crons updated this host's stages — so committing it now would
-                    # raise `could not serialize access due to concurrent update`
-                    # and LOSE the flag update below (the uploaded objects, being
-                    # external side effects, persist regardless of this cursor).
-                    # Drop the stale snapshot and re-evaluate the bucket in a fresh
-                    # one so the flag write commits cleanly against current rows.
+                        _logger.exception("Fallback backup failed for host %s", host.id)
+                    # The fallback held this snapshot open for minutes while the
+                    # refresh crons touched these rows; drop it (uploaded objects
+                    # persist regardless) and re-read fresh so the per-instance flag
+                    # writes commit cleanly instead of hitting a serialization failure.
                     self.env.cr.rollback()
                     self.env.clear()
-                    recent = any(
-                        Storage._has_recent_object(p, max_age_hours=max_age)
-                        for p in host._backup_prefixes())
-                if recent:
-                    vals = {'last_backup_check': now}
-                    # Keep last_backup meaningful for the "missed daily backup"
-                    # indicator: the bucket has a fresh backup, so if last_backup is
-                    # stale — e.g. it came from the manager fallback (whose in-txn
-                    # stamp was rolled back to avoid a serialization failure), or the
-                    # host's agent doesn't report back — record that a backup exists
-                    # now, so the server isn't shown as overdue while it IS covered.
+                    host = self.browse(host.id)
+                    stages = host.stage_ids.filtered(lambda s: s._expects_backup())
+                    fresh = host._recent_backup_segs(max_age)
+                # 2. Per-instance: stamp last_backup / set-or-clear the instance flag.
+                host_reason, still_missing = None, self.env['server.stage']
+                for s in stages:
+                    if s._backup_seg() in fresh:
+                        vals = {}
+                        if not s.last_backup or s.last_backup < (
+                                now - timedelta(hours=max_age)):
+                            vals['last_backup'] = now
+                        if s.backup_review_needed:
+                            vals.update({'backup_review_needed': False,
+                                         'backup_review_reason': False})
+                        if vals:
+                            s.sudo().write(vals)
+                    else:
+                        still_missing |= s
+                        if host_reason is None:      # probe the host once for the reason
+                            host_reason = host._diagnose_backup_gap()
+                        s.sudo().write({'backup_review_needed': True,
+                                        'backup_review_reason': _(
+                                            "No backup found in the bucket for instance "
+                                            "'%s' in the last %sh.\n\n%s")
+                                        % (s.name, max_age, host_reason)})
+                # 3. Host-level rollup (drives the Servers list) + last_backup_check.
+                hvals = {'last_backup_check': now,
+                         'backup_review_needed': bool(still_missing)}
+                if still_missing:
+                    hvals['backup_review_reason'] = _(
+                        "%d instance(s) on this server have no daily backup: %s") % (
+                        len(still_missing), ", ".join(still_missing.mapped('name')))
+                    _logger.warning("Backup monitor: host %s has %d instance(s) with "
+                                    "NO recent backup", host.name, len(still_missing))
+                else:
+                    hvals['backup_review_reason'] = False
                     if not host.last_backup or host.last_backup < (
                             now - timedelta(hours=max_age)):
-                        vals['last_backup'] = now
-                    if host.backup_review_needed:
-                        vals.update({'backup_review_needed': False,
-                                     'backup_review_reason': False})
-                        # Clear only the review flags this monitor raised.
-                        host.stage_ids.sudo().filtered('needs_review').write(
-                            {'needs_review': False})
-                    host.write(vals)
-                else:
-                    reason = host._diagnose_backup_gap()
-                    header = _("No backup found in the bucket for '%s' in the last "
-                               "%sh (checked %s).") % (
-                        host.name, max_age, ", ".join(host._backup_prefixes()))
-                    host.write({'backup_review_needed': True,
-                                'backup_review_reason': header + "\n\n" + reason,
-                                'last_backup_check': now})
-                    host.stage_ids.sudo().write({'needs_review': True})
-                    _logger.warning("Backup monitor: host %s has NO recent backup",
-                                    host.name)
+                        hvals['last_backup'] = now
+                host.write(hvals)
                 self.env.cr.commit()
             except Exception:
                 self.env.cr.rollback()
                 _logger.exception("Backup verify failed for host %s", host.id)
-        # One consolidated Teams alert for everything that needs attention today
-        # (servers still without a backup + instances flagged for review). Sent once
-        # per daily run so the channel is a governed digest, not per-host spam.
+        # One consolidated Teams digest for everything that needs attention today.
         try:
             self._alert_backup_digest()
         except Exception:
@@ -1153,34 +1156,31 @@ class ServerHost(models.Model):
 
     @api.model
     def _alert_backup_digest(self):
-        """Send ONE Teams alert summarising what needs attention: servers with no
-        daily backup, and instances flagged for review. No-op when nothing is wrong
-        or no webhook is configured (so a healthy day stays silent)."""
+        """Send ONE Teams alert listing, PER INSTANCE, what needs attention: instances
+        with no daily backup, and instances flagged for review by discovery. No-op
+        when nothing is wrong or no webhook is configured (a healthy day stays silent)."""
         Storage = self.env['server.backup.storage']
         if not Storage._teams_webhook():
             return
-        missing = self.search([('backup_review_needed', '=', True)])
-        review = self.env['server.stage'].search([
-            ('needs_review', '=', True),
-            ('host_id.backup_review_needed', '=', False)])
+        Stage = self.env['server.stage']
+        missing = Stage.search([('backup_review_needed', '=', True)])
+        review = Stage.search([('needs_review', '=', True)])
         if not missing and not review:
             return
         lines = []
         if missing:
-            lines.append("**🔴 Servers with NO daily backup (%d)**" % len(missing))
-            for h in missing:
-                why = next((ln for ln in (h.backup_review_reason or '').splitlines()
-                            if ln.strip()), _("no recent backup in the bucket"))
-                lines.append("• **%s** (%s) — %s" % (h.name, h.ip or '?', why.strip()))
+            lines.append("**🔴 Instances with NO daily backup (%d)**" % len(missing))
+            for s in missing:
+                lines.append("• **%s** — server %s (%s)" % (
+                    s.name, s.host_id.name, s.host_id.ip or '?'))
         if review:
             lines.append("**🟠 Instances needing review (%d)**" % len(review))
             for s in review:
                 why = next((ln for ln in (s.review_reason or '').splitlines()
                             if ln.strip()), _("flagged for review"))
-                lines.append("• **%s** on %s — %s" % (
-                    s.name, s.host_id.name, why.strip()))
+                lines.append("• **%s** on %s — %s" % (s.name, s.host_id.name, why.strip()))
         color = "D40000" if missing else "E8A400"
-        title = "%s — %s" % (_("Server backup alert"), fields.Date.today())
+        title = "%s — %s" % (_("Daily backup alert"), fields.Date.today())
         Storage._post_teams(title, "\n\n".join(lines), color)
 
     def action_discover(self):

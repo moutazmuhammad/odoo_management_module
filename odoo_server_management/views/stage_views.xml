@@ -90,6 +90,8 @@
                                     <field name="service_name" readonly="1"/>
                                     <field name="odoo_version"/>
                                     <field name="needs_review"/>
+                                    <field name="last_backup"/>
+                                    <field name="auto_stop"/>
                                 </group>
                                 <group>
                                     <field name="log_file_path"/>
@@ -100,6 +102,13 @@
                                     <field name="python_bin"/>
                                 </group>
                             </group>
+                            <field name="backup_review_needed" invisible="1"/>
+                            <div class="alert alert-danger" role="alert"
+                                 attrs="{'invisible': [('backup_review_needed', '=', False)]}">
+                                <strong>🔴 No daily backup for this instance.</strong>
+                                <field name="backup_review_reason" readonly="1" nolabel="1"
+                                       attrs="{'invisible': [('backup_review_reason', '=', False)]}"/>
+                            </div>
                             <div class="alert alert-warning" role="alert"
                                  attrs="{'invisible': [('needs_review', '=', False)]}">
                                 <strong>⚠ Needs review:</strong>
@@ -200,14 +209,19 @@
         <field name="model">server.stage</field>
         <field name="arch" type="xml">
             <tree string="Stages" js_class="server_stage_list"
-                  decoration-warning="needs_review">
+                  decoration-danger="backup_review_needed or backup_overdue"
+                  decoration-warning="needs_review and not backup_review_needed and not backup_overdue">
                 <field name="name"/>
                 <field name="host_id" groups="odoo_server_management.group_devops"/>
                 <field name="odoo_version"/>
                 <field name="odoo_status"/>
+                <field name="last_backup" string="Last Daily Backup"/>
+                <field name="backup_review_needed" string="Backup Missing" readonly="1"/>
                 <field name="needs_review" readonly="1"/>
                 <field name="client_stage" widget="boolean_toggle" readonly="1"
                        groups="odoo_server_management.group_devops"/>
+                <!-- loaded for the row decoration only -->
+                <field name="backup_overdue" invisible="1"/>
                 <button name="action_check_status" type="object"
                         string="Check Status" icon="fa-refresh"
                         groups="odoo_server_management.group_user"/>
@@ -225,6 +239,8 @@
                 <filter string="Running" name="running" domain="[('odoo_status', '=', 'running')]"/>
                 <filter string="Stopped" name="stopped" domain="[('odoo_status', '=', 'stopped')]"/>
                 <separator/>
+                <filter string="Missed Daily Backup" name="backup_overdue" domain="[('backup_overdue', '=', True)]"/>
+                <filter string="Backup Missing" name="backup_missing" domain="[('backup_review_needed', '=', True)]"/>
                 <filter string="Needs Review" name="needs_review" domain="[('needs_review', '=', True)]"/>
                 <group expand="0" string="Group By">
                     <filter string="Server" name="group_by_host" context="{'group_by': 'host_id'}"/>

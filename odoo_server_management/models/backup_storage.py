@@ -249,6 +249,38 @@ class BackupStorage(models.AbstractModel):
         return False
 
     @api.model
+    def _recent_segs(self, key_prefix, max_age_hours=28):
+        """Set of immediate child path segments under `key_prefix` that hold a recent
+        (< max_age_hours) non-empty object — so PER-INSTANCE backup freshness can be
+        checked with ONE listing per server instead of one call per instance. E.g.
+        prefix 'erp/my-server/' -> {'a.example.com', '46.1.2.3-8069', ...}."""
+        import datetime
+        if not self._keys_set():
+            return set()
+        cli = self._boto_client()
+        bucket = self._bucket()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        segs, token, plen = set(), None, len(key_prefix)
+        while True:
+            kw = {'Bucket': bucket, 'Prefix': key_prefix}
+            if token:
+                kw['ContinuationToken'] = token
+            resp = cli.list_objects_v2(**kw)
+            for obj in resp.get('Contents', []):
+                if not obj.get('Size'):
+                    continue
+                age_h = (now - obj['LastModified']).total_seconds() / 3600.0
+                if 0 <= age_h <= max_age_hours:
+                    seg = obj['Key'][plen:].split('/', 1)[0]
+                    if seg:
+                        segs.add(seg)
+            if resp.get('IsTruncated'):
+                token = resp.get('NextContinuationToken')
+            else:
+                break
+        return segs
+
+    @api.model
     def _prune(self, key_prefix, retention_days=None):
         """Delete objects under `key_prefix` older than retention_days — but NEVER
         the most recent object in each database's folder.
