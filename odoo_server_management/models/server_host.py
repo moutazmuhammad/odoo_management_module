@@ -111,6 +111,13 @@ class ServerHost(models.Model):
         string='Last Backup Check', readonly=True, copy=False)
     stage_ids = fields.One2many('server.stage', 'host_id', string='Detected Instances')
     instance_count = fields.Integer(compute='_compute_instance_count')
+    # True when any detected instance on this server is flagged for review — so the
+    # Servers list can highlight it (the backup monitor also flags every stage of a
+    # host whose backup is missing, so this covers "backup review" too).
+    stage_review_needed = fields.Boolean(
+        string='Instance Needs Review', compute='_compute_stage_review_needed',
+        help="Any detected instance on this server is flagged for review "
+             "(discovery could not resolve it, or its backup is missing).")
 
     _sql_constraints = [
         ('unique_host_ip', 'unique(ip)', 'A host with this IP already exists!'),
@@ -141,6 +148,11 @@ class ServerHost(models.Model):
     def _compute_instance_count(self):
         for host in self:
             host.instance_count = len(host.stage_ids)
+
+    @api.depends('stage_ids.needs_review')
+    def _compute_stage_review_needed(self):
+        for host in self:
+            host.stage_review_needed = any(host.stage_ids.mapped('needs_review'))
 
     @api.constrains('ip')
     def _check_ip(self):
