@@ -80,9 +80,10 @@
                     <group string="Auto-Stop Instances">
                         <field name="auto_stop_days"/>
                         <div colspan="2" class="text-muted" style="font-size:12px;">
-                            Daily, instances on servers with <b>Stop Instances</b> on (and whose
-                            <b>Auto-Stop</b> is ticked) are stopped once their service has been
-                            running longer than this many days. Set 0 to disable.
+                            Daily, every instance whose own <b>Auto-Stop</b> is ticked (on any
+                            server) is stopped once its service has been running longer than this
+                            many days. Control is per instance — there is no server-level gate.
+                            Set 0 to disable.
                         </div>
                     </group>
                     <group string="User Signup (self-registration → 'User' role only)">

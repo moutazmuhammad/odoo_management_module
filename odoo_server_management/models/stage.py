@@ -9,6 +9,7 @@ import subprocess
 import warnings
 import requests
 import psycopg2
+from datetime import timedelta
 from psycopg2 import errorcodes
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -165,6 +166,21 @@ class Stage(models.Model):
         help="Explanation of why discovery flagged this instance for manual "
              "review (incomplete detection, or an ambiguous nginx domain).",
     )
+    # ------------------------------------------------------------------
+    # Per-instance daily-backup governance (each instance tracked on its own).
+    # ------------------------------------------------------------------
+    last_backup = fields.Datetime(
+        string='Last Daily Backup', readonly=True, copy=False,
+        help="When this instance's database was last confirmed backed up in the "
+             "bucket (set by the daily backup monitor).")
+    backup_review_needed = fields.Boolean(
+        string='Backup Missing', readonly=True, copy=False,
+        help="This instance has no recent backup in the bucket — see the reason.")
+    backup_review_reason = fields.Text(string='Backup Issue', readonly=True, copy=False)
+    backup_overdue = fields.Boolean(
+        string='Missed Daily Backup', compute='_compute_backup_overdue',
+        search='_search_backup_overdue',
+        help="This instance has taken no successful backup in the last day.")
     # Comma-separated list of discovery-managed fields the user has hand-edited.
     # Discovery leaves these fields untouched on re-scan so manual corrections
     # stick (see DISCOVERY_MANAGED_FIELDS and _sync_instances). copy=False so a
@@ -634,6 +650,45 @@ class Stage(models.Model):
             return True
         return self.sudo()._run_bg(_('Check status'),
                                    self._status_check_work(), reload=True)
+
+    # ------------------------------------------------------------------
+    # Per-instance backup governance helpers
+    # ------------------------------------------------------------------
+    def _backup_seg(self):
+        """This instance's path segment in a backup object key — its nginx domain,
+        else `<ip>:<port>` with ':'->'-' — matching exactly how the daily backup
+        keys are built (server_host._instance_seg), so a per-instance bucket lookup
+        finds this instance's own objects."""
+        self.ensure_one()
+        name = (self.name or '').strip()
+        m = re.search(r':(\d+)', name)
+        it = {'domain': '', 'port': m.group(1)} if m else {'domain': name, 'port': ''}
+        return self.host_id._instance_seg(it)
+
+    def _expects_backup(self):
+        """True if THIS instance should be producing daily backups (its host is
+        reachable and it has at least one database)."""
+        self.ensure_one()
+        return bool(self.host_id.key_authorized
+                    and (self.available_databases or '').strip())
+
+    @api.depends('last_backup', 'available_databases', 'host_id.key_authorized')
+    def _compute_backup_overdue(self):
+        max_age = self.env['server.host']._backup_max_age_hours()
+        cutoff = fields.Datetime.now() - timedelta(hours=max_age)
+        for st in self:
+            st.backup_overdue = st._expects_backup() and (
+                not st.last_backup or st.last_backup < cutoff)
+
+    def _search_backup_overdue(self, operator, value):
+        max_age = self.env['server.host']._backup_max_age_hours()
+        cutoff = fields.Datetime.now() - timedelta(hours=max_age)
+        overdue = self.search([('host_id.key_authorized', '=', True),
+                               ('available_databases', '!=', False)]).filtered(
+            lambda s: s._expects_backup() and (
+                not s.last_backup or s.last_backup < cutoff))
+        want = (operator == '=') == bool(value)
+        return [('id', 'in' if want else 'not in', overdue.ids)]
 
     def action_sync_domain_to_nginx(self):
         """Push the manually-entered domain (Stage Name) into this instance's
