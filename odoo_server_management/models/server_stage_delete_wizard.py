@@ -5,7 +5,7 @@ import logging
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError
 
-from .stage import GROUP_DEVOPS
+from .stage import GROUP_ADMIN
 
 _logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class ServerStageDeleteWizard(models.TransientModel):
         if not stage.exists():
             return {'type': 'ir.actions.act_window_close'}
         # Gate the REAL user (before the sudo below elevates to superuser).
-        stage._check_access(GROUP_DEVOPS)
+        stage._check_access(GROUP_ADMIN)
         if (self.confirm or '').strip() != (stage.name or '').strip():
             raise UserError(_(
                 "To confirm, type the instance name exactly: %s") % stage.name)

@@ -108,7 +108,7 @@
                                             groups="odoo_server_management.group_user"/>
                                     <button name="action_delete_instance" type="object"
                                             string="Delete Instance" icon="fa-trash"
-                                            groups="odoo_server_management.group_devops"/>
+                                            groups="odoo_server_management.group_admin"/>
                                     <button name="action_open_form" type="object"
                                             string="Open / Backups" icon="fa-folder-open-o"/>
                                 </tree>
