@@ -42,9 +42,10 @@
         <field name="implied_ids" eval="[(4, ref('group_devops'))]"/>
     </record>
 
-    <!-- Record rules: a "DevOps Only" server's instances are hidden from plain
-         Developers (see rule_stage_developer). Servers themselves are only
-         visible to DevOps/Admins, who see all of them. -->
+    <!-- Record rules: Developers may READ every stage, including Client Server /
+         DevOps-only hosts (see rule_stage_developer) — the model ACL keeps them
+         read-only and can_act keeps the action buttons Tech Lead+. Servers
+         themselves stay visible only to DevOps/Admins, who see all of them. -->
     <record id="rule_host_devops_all" model="ir.rule">
         <field name="name">Servers: DevOps see all</field>
         <field name="model_id" ref="model_server_host"/>
@@ -53,9 +54,9 @@
     </record>
 
     <record id="rule_stage_developer" model="ir.rule">
-        <field name="name">Stages: hide instances of DevOps-only servers</field>
+        <field name="name">Stages: Developers read all (incl. client servers)</field>
         <field name="model_id" ref="model_server_stage"/>
-        <field name="domain_force">['|', ('host_id', '=', False), ('host_id.devops_only', '=', False)]</field>
+        <field name="domain_force">[(1, '=', 1)]</field>
         <field name="groups" eval="[(4, ref('group_user'))]"/>
     </record>
     <record id="rule_stage_devops_all" model="ir.rule">
