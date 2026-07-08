@@ -110,18 +110,19 @@ class Stage(models.Model):
     client_stage = fields.Boolean(string='Client Server', default=False)
     notes = fields.Text(string='Notes')
     # Per-user flag for the UI: can the current user run operational actions on
-    # this instance? Client servers require Tech Lead+ (Tech Lead / DevOps /
-    # Admin); normal instances any User (Developer+).
+    # this instance? Every operational action (Start/Stop/Restart, Pull Code,
+    # Backup, Upgrade) now requires Tech Lead+ (Tech Lead / DevOps / Admin) on
+    # ALL instances — client or not. Plain Developers are view-only.
     can_act = fields.Boolean(compute='_compute_can_act', depends_context=('uid',))
 
     @api.depends('client_stage')
     def _compute_can_act(self):
         # Tech Lead is implied by DevOps and Admin, so this one check covers all
-        # three roles allowed to act on Client Server stages.
+        # three roles allowed to run operational actions.
         is_operator = (self.env.su
                        or self.env.user.has_group(GROUP_TECH_LEAD))
         for rec in self:
-            rec.can_act = (not rec.client_stage) or is_operator
+            rec.can_act = is_operator
 
     host_id = fields.Many2one(
         'server.host',
@@ -560,11 +561,12 @@ class Stage(models.Model):
             raise AccessError(_("You are not allowed to perform this operation."))
 
     def _check_action_access(self):
-        """Gate an operational action: a **Client Server** instance may only be
-        acted on by Tech Leads/DevOps/Admins; a normal instance by any User.
-        (DevOps and Admin imply Tech Lead, so the single check covers them.)"""
+        """Gate an operational action (Start/Stop/Restart, Pull Code, Backup,
+        Upgrade): every instance — client or not — may only be acted on by Tech
+        Leads/DevOps/Admins. Plain Developers are view-only. (DevOps and Admin
+        imply Tech Lead, so the single check covers them.)"""
         self.ensure_one()
-        self._check_access(GROUP_TECH_LEAD if self.client_stage else GROUP_USER)
+        self._check_access(GROUP_TECH_LEAD)
 
     # ===========================
     # Helpers
