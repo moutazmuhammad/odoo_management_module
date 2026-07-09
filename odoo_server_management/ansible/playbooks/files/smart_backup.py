@@ -42,6 +42,7 @@ import subprocess
 SYSTEM_DBS = {'postgres', 'template0', 'template1', 'defaultdb'}
 DETECT_MARKER = 'ODOO_BACKUP_DETECT:'
 RESULT_MARKER = 'ODOO_BACKUP_RESULT:'
+DUMP_MARKER = 'ODOO_BACKUP_DUMP:'
 SINGLE_LIMIT = 4 * 1024 ** 3  # 4 GiB — stay safely under the 5 GB single-PUT cap
 CHUNK = 8 * 1024 * 1024
 
@@ -994,6 +995,30 @@ def backup(mapfile):
     print(RESULT_MARKER + base64.b64encode(json.dumps(results).encode()).decode())
 
 
+def dumpfile(db, out_path):
+    """Build ONE database's Odoo-format backup zip to a LOCAL file (no upload).
+
+    Used by the shell backup agent (backup_agent.sh), which then hands the file to
+    s3cmd. This reuses the SAME robust pg_dump->zip path as every other backup —
+    never Odoo's /web/database/backup web endpoint, which silently degrades to an
+    HTML error page (saved as a corrupt zip) when its own pg_dump step fails.
+    Prints DUMP_MARKER:<b64 json> {ok, path, bytes} | {ok:false, error}."""
+    res = {'ok': False, 'db': db, 'path': out_path}
+    try:
+        conn = _resolve_conn(db)
+        fs = find_filestore(db)
+        build_zip(conn, db, fs, out_path)
+        res['ok'] = True
+        try:
+            res['bytes'] = os.path.getsize(out_path)
+        except OSError:
+            res['bytes'] = 0
+    except Exception as exc:  # noqa: BLE001 — report, the caller decides
+        res['error'] = str(exc)
+    print(DUMP_MARKER + base64.b64encode(json.dumps(res).encode()).decode())
+    return res
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else 'detect'
     if mode == 'detect':
@@ -1006,8 +1031,12 @@ def main():
         detect(force)
     elif mode == 'backup' and len(sys.argv) > 2:
         backup(sys.argv[2])
+    elif mode == 'dumpfile' and len(sys.argv) > 3:
+        res = dumpfile(sys.argv[2], sys.argv[3])
+        sys.exit(0 if res.get('ok') else 1)
     else:
-        sys.stderr.write('usage: smart_backup.py detect [force_b64] | backup <mapfile>\n')
+        sys.stderr.write('usage: smart_backup.py detect [force_b64] | '
+                         'backup <mapfile> | dumpfile <db> <out_path>\n')
         sys.exit(2)
 
 

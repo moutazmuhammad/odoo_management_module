@@ -1,7 +1,8 @@
 ---
-# Install the standalone self-backup agent + a daily Linux cron on a managed
-# server. No Spaces key is written here — only the manager URL and a low-
-# privilege per-host token. The agent fetches short-lived upload URLs at run time.
+# Install the shell self-backup agent (backup_agent.sh) + a daily Linux cron on
+# a managed server. The S3 credentials ARE written here (root-only 0600 s3cfg,
+# rendered per-host by the manager) so the server uploads its own backups with
+# s3cmd — no pre-signed-URL round-trip to the manager on every run.
 - hosts: all
   gather_facts: no
   become: yes
@@ -12,33 +13,27 @@
         state: directory
         mode: '0755'
 
-    - name: Install detection/upload helper
+    - name: Install detection/dump helper
       copy:
         src: files/smart_backup.py
         dest: /opt/odoo-backup/smart_backup.py
         mode: '0755'
 
-    - name: Install backup agent
-      copy:
-        src: files/backup_agent.py
-        dest: /opt/odoo-backup/agent.py
-        mode: '0755'
-
-    - name: Write agent config (NO secret — the manager identifies us by source IP)
-      copy:
-        dest: /etc/odoo-backup.conf
-        mode: '0644'
+    - name: Install shell backup agent (with per-host S3 config baked in)
+      template:
+        src: files/backup_agent.sh.j2
+        dest: /opt/odoo-backup/backup_agent.sh
         owner: root
         group: root
-        content: |
-          # No secret is stored here. The manager authenticates this agent by its
-          # source IP (recorded as the host's IP); it only ever hands back
-          # short-lived pre-signed upload URLs at run time.
-          manager_url = {{ manager_url }}
-          host_header = {{ host_header | default('') }}
-          extra_dbs = {{ extra_dbs | default('') }}
-          insecure = {{ insecure | default('0') }}
-          agent_version = {{ agent_version | default('') }}
+        mode: '0700'
+
+    - name: Remove the legacy Python agent + its config (superseded by the shell agent)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/odoo-backup/agent.py
+        - /etc/odoo-backup.conf
 
     - name: Install daily cron
       copy:
@@ -48,7 +43,7 @@
           # Odoo self-backup agent — daily at {{ '%02d'|format(backup_hour|int) }}:{{ '%02d'|format(jitter|int) }} (server time)
           SHELL=/bin/bash
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-          {{ jitter|int }} {{ backup_hour|int }} * * * root /usr/bin/python3 /opt/odoo-backup/agent.py >> /var/log/odoo-backup.log 2>&1
+          {{ jitter|int }} {{ backup_hour|int }} * * * root /opt/odoo-backup/backup_agent.sh >> /var/log/odoo-backup.log 2>&1
 
     - name: Rotate the agent log so it never grows unbounded
       copy:
@@ -66,4 +61,4 @@
 
     - name: Report
       debug:
-        msg: "agent installed; daily at {{ backup_hour }}:{{ jitter }}"
+        msg: "shell agent installed; daily at {{ backup_hour }}:{{ jitter }}"

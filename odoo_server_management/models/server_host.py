@@ -101,6 +101,11 @@ class ServerHost(models.Model):
     # host whose stamp is older than _AGENT_VERSION so bug fixes reach live hosts.
     agent_version = fields.Char(string='Agent Version', groups=GROUP_DEVOPS,
                                 readonly=True, copy=False)
+    # When the agent (script + its baked-in S3 config) was last pushed to the host.
+    # The ensure-agents cron re-pushes daily so a change to the S3 credentials /
+    # bucket / endpoint propagates to every server within a day.
+    last_agent_deploy = fields.Datetime(string='Agent Last Deployed',
+                                        groups=GROUP_DEVOPS, readonly=True, copy=False)
     last_backup = fields.Datetime(string='Last Daily Backup', readonly=True)
     # Set by the daily backup-existence monitor when no backup for this host has
     # landed in the shared Space within the allowed window (today or the day
@@ -501,7 +506,7 @@ class ServerHost(models.Model):
     # with pre-signed part URLs (512 MiB parts) so any size works, streamed.
     _BACKUP_SINGLE_LIMIT = 4 * 1024 ** 3
     _BACKUP_PART_SIZE = 512 * 1024 ** 2
-    # Bump whenever the deployed agent code (files/backup_agent.py or
+    # Bump whenever the deployed agent code (files/backup_agent.sh.j2 or
     # files/smart_backup.py) changes so the ensure-agents cron redeploys live
     # hosts. v2: agent survives the manager's http->https 301 (kept POST body).
     # v3: smart_backup.py made Python 3.6-compatible (dropped 3.7+ subprocess
@@ -521,7 +526,12 @@ class ServerHost(models.Model):
     # host failed, so detection silently dropped the DB and the daily backup
     # reported "Uploaded 0 of 1"). `False`/`None` conf values now collapse to the
     # client default; only a numeric db_port is honoured.
-    _AGENT_VERSION = '8'
+    # v9: the Python agent (agent.py, presign round-trip to the manager on every
+    # run) is REPLACED by a self-contained shell agent (backup_agent.sh) that
+    # detects DBs via smart_backup.py, dumps each with the SAME pg_dump->zip path
+    # (new `dumpfile` mode), and uploads with s3cmd using an S3 config baked into a
+    # root-only /etc/odoo-backup.s3cfg — no per-run manager call to stall on.
+    _AGENT_VERSION = '9'
 
     @staticmethod
     def _backup_norm(value):
@@ -879,10 +889,10 @@ class ServerHost(models.Model):
         return self.env['server.stage']._op_started_toast(label, reload=True)
 
     def action_deploy_agent(self):
-        """Install the self-backup agent + a daily Linux cron on this server. The
-        server then backs itself up (presign-on-demand) with NO secret stored
-        locally — the manager identifies the agent by its source IP — and the
-        manager's daily cron skips this host afterwards."""
+        """Install the shell self-backup agent + a daily Linux cron on this server.
+        The server then backs itself up with s3cmd — the S3 credentials are written
+        to a root-only /etc/odoo-backup.s3cfg (0600) so no per-run manager call can
+        stall the backup — and the manager's daily cron skips this host afterwards."""
         self.env['server.stage']._check_access(GROUP_DEVOPS)
         self.ensure_one()
         self._require_key()
@@ -908,6 +918,10 @@ class ServerHost(models.Model):
         except (TypeError, ValueError):
             hour = 2
         hour = max(0, min(23, hour))
+        # The shell agent uploads with s3cmd, so it needs the S3 config baked into
+        # its root-only 0600 s3cfg. host_base is the endpoint minus its scheme
+        # (e.g. https://fra1.digitaloceanspaces.com -> fra1.digitaloceanspaces.com).
+        host_base = re.sub(r'^https?://', '', Storage._endpoint_url()).rstrip('/')
         res = self._run('deploy_agent.yml', {
             'manager_url': manager_url,
             'host_header': host_header,
@@ -915,11 +929,22 @@ class ServerHost(models.Model):
             'jitter': (self.id * 7) % 60,           # spread servers across the hour
             'extra_dbs': (self.backup_extra_dbs or '').replace('\n', ','),
             'agent_version': self._AGENT_VERSION,
+            # S3 config for the shell agent's s3cmd uploads.
+            'backup_access_key': Storage._access_key(),
+            'backup_secret_key': Storage._secret_key(),
+            'backup_host_base': host_base,
+            'backup_bucket': Storage._bucket(),
+            'backup_prefix': Storage._prefix(),
+            'backup_category': self.backup_category or 'odex',
+            'backup_server_seg': self._backup_server_seg(),
+            'backup_host_ip': self.ip or '',
+            'keep': Storage._retention_days() or 7,
         })
         if not res.get('success'):
             raise UserError(_("Agent deploy failed:\n%s") % (res.get('output') or ''))
         self.sudo().write({'backup_agent_enabled': True,
-                           'agent_version': self._AGENT_VERSION})
+                           'agent_version': self._AGENT_VERSION,
+                           'last_agent_deploy': fields.Datetime.now()})
         return self.env['server.stage']._notify(
             _("✅ Self-backup agent installed on %s (daily at %02d:%02d, server "
               "time). The manager will no longer back this host up itself.")
@@ -936,14 +961,20 @@ class ServerHost(models.Model):
             return
         if not self.env['server.backup.storage']._keys_set():
             return
-        # Install on hosts that don't have the agent yet, AND redeploy hosts whose
-        # deployed agent code is older than the current version (so fixes — e.g.
-        # the http->https redirect fix — reach already-enrolled servers).
+        # Redeploy a host when ANY of these hold, so the on-host script + its
+        # baked-in S3 config never drift:
+        #   • the agent isn't installed yet (new server), OR
+        #   • its deployed code is older than the current version (bug fixes), OR
+        #   • it hasn't been refreshed in ~a day — a DAILY re-push so a change to
+        #     the S3 credentials / bucket / endpoint reaches every server.
+        stale = fields.Datetime.now() - timedelta(hours=20)
         hosts = self.search([
             ('key_authorized', '=', True),
             ('server_type', '=', 'odoo'),   # 'other' servers get no backup agent
-            '|', ('backup_agent_enabled', '=', False),
-                 ('agent_version', '!=', self._AGENT_VERSION)])
+            '|', '|', ('backup_agent_enabled', '=', False),
+                      ('agent_version', '!=', self._AGENT_VERSION),
+                 '|', ('last_agent_deploy', '=', False),
+                      ('last_agent_deploy', '<', stale)])
         for host in hosts:
             try:
                 host.action_deploy_agent()
@@ -1052,7 +1083,7 @@ class ServerHost(models.Model):
             lines.append(_("Disk: %s") % disk_txt)
         if not info.get('agent_installed'):
             lines.append(_("The self-backup agent is not installed "
-                           "(/opt/odoo-backup/agent.py missing)."))
+                           "(/opt/odoo-backup/backup_agent.sh missing)."))
         if not info.get('cron_installed'):
             lines.append(_("The daily cron is not installed "
                            "(/etc/cron.d/odoo-backup missing)."))

@@ -21,7 +21,8 @@
                 }
             except Exception:
                 pass
-        info['agent_installed'] = os.path.exists('/opt/odoo-backup/agent.py')
+        info['agent_installed'] = (os.path.exists('/opt/odoo-backup/backup_agent.sh')
+                                   or os.path.exists('/opt/odoo-backup/agent.py'))
         info['cron_installed'] = os.path.exists('/etc/cron.d/odoo-backup')
         tail = ''
         try:

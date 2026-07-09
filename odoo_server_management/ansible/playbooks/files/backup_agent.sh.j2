@@ -1,0 +1,198 @@
+#!/bin/bash
+# ============================================================================
+# Odoo self-backup agent (shell) — runs from local cron, as root.
+#
+# This is the SHELL replacement for the Python agent (agent.py). It does the
+# same job — back up EVERY exposed database of EVERY stage on this server to the
+# shared object store — but uploads with `s3cmd` using S3 credentials baked in
+# here (rendered per-host by the manager's deploy_agent.yml), instead of asking
+# the manager for pre-signed URLs on every run. Fewer moving parts = fewer ways
+# for a nightly run to silently stall.
+#
+# Flow:
+#   1. smart_backup.py detect  -> the list of databases on THIS host, each with
+#      its path segment (nginx domain, else ip:port). Same detection the manager
+#      relies on; no manager round-trip needed at run time.
+#   2. For each db: smart_backup.py dumpfile -> a LOCAL Odoo-format zip via a
+#      direct pg_dump (NOT /web/database/backup, which saves a corrupt HTML zip
+#      when its own pg_dump fails), validate it, then `s3cmd put` to
+#          <prefix>/<category>/<server>/<domain-or-ip:port>/<db>/<db>_<date>.zip
+#   3. Keep the newest {{ keep }} objects per db folder; delete older ones.
+#
+# EVERYTHING below the CONFIG block is rendered verbatim — only the values in
+# CONFIG are templated, so the logic stays identical across hosts.
+# ============================================================================
+set -u
+export LC_ALL=C
+
+# ------------------------------ CONFIG (templated) --------------------------
+ACCESS_KEY="{{ backup_access_key }}"
+SECRET_KEY="{{ backup_secret_key }}"
+HOST_BASE="{{ backup_host_base }}"          # e.g. fra1.digitaloceanspaces.com
+BUCKET="{{ backup_bucket }}"
+PREFIX="{{ backup_prefix | default('') }}"  # optional global key prefix
+CATEGORY="{{ backup_category | default('odex') }}"
+SERVER_SEG="{{ backup_server_seg }}"        # slug of this server's name
+HOST_IP="{{ backup_host_ip }}"              # manager-known public IP
+KEEP={{ keep | default(7) }}                # backups to keep per db folder
+EXTRA_DBS="{{ extra_dbs | default('') }}"   # additive comma list of db names
+AGENT_DIR="/opt/odoo-backup"
+WORK_DIR="/var/tmp/odoo-backup-work"
+S3CFG="/etc/odoo-backup.s3cfg"
+# ----------------------------------------------------------------------------
+
+log() { echo "backup-agent: $*"; }
+
+install_dependencies() {
+    for dep in s3cmd unzip python3; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            log "installing missing dependency: $dep"
+            apt-get update -qq && apt-get install -y "$dep" >/dev/null 2>&1 \
+                || { log "ERROR could not install $dep"; return 1; }
+        fi
+    done
+}
+
+write_s3cfg() {
+    # Root-only S3 config so the key never leaks to other users on the box.
+    umask 077
+    cat > "$S3CFG" <<EOF
+[default]
+access_key = ${ACCESS_KEY}
+secret_key = ${SECRET_KEY}
+host_base = ${HOST_BASE}
+host_bucket = %(bucket)s.${HOST_BASE}
+use_https = True
+signature_v2 = False
+EOF
+    chmod 600 "$S3CFG"
+}
+
+s3() { s3cmd -c "$S3CFG" "$@"; }
+
+# Normalize an ip/domain path segment the SAME way the manager does
+# (server_host._backup_host_seg): lowercase; unsafe chars -> '-'; collapse
+# repeated '.'/'-'; strip edge '.'/'-' (guards against '..' traversal).
+host_seg() {
+    local s
+    s=$(echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g')
+    s=$(echo "$s" | sed -E 's/-{2,}/-/g; s/\.{2,}/./g')
+    echo "$s" | sed -E 's/^[.-]+//; s/[.-]+$//'
+}
+
+# Join non-empty parts with '/', dropping a leading/trailing slash on each.
+join_key() {
+    local out="" p
+    for p in "$@"; do
+        p=$(echo "$p" | sed -E 's#^/+##; s#/+$##')
+        [ -z "$p" ] && continue
+        [ -z "$out" ] && out="$p" || out="$out/$p"
+    done
+    echo "$out"
+}
+
+# Keep only the newest $KEEP objects under an s3 folder; delete the rest.
+cleanup_old_backups() {
+    local folder="$1" files count to_delete
+    files=$(s3 ls "$folder" | sort | awk '{print $NF}' | grep -E '\.zip$' || true)
+    [ -z "$files" ] && return 0
+    count=$(echo "$files" | wc -l)
+    to_delete=$((count - KEEP))
+    [ "$to_delete" -le 0 ] && return 0
+    log "pruning $to_delete old backup(s) under $folder"
+    echo "$files" | head -n "$to_delete" | while read -r f; do
+        [ -n "$f" ] && { s3 del "$f" >/dev/null 2>&1 || log "failed to delete $f"; }
+    done
+}
+
+backup_all() {
+    local day detect_line targets n ok db domain port seg keyfolder key zip
+    day=$(date +%Y-%m-%d)
+    # Start clean: wipe any leftover from a previous run that was hard-killed
+    # (OOM / reboot / timeout) BEFORE its EXIT trap could fire, so a stale zip is
+    # never left sitting on the managed server.
+    rm -rf "$WORK_DIR"
+    mkdir -p "$WORK_DIR"; chmod 700 "$WORK_DIR"
+    # Keep smart_backup.py's own scratch (any pg_dump spool) UNDER the dir we wipe,
+    # so nothing it writes can be left behind either.
+    export ODOO_BACKUP_TMPDIR="$WORK_DIR"
+
+    # 1. Detect this host's databases (base64 json list of {db,domain,port,...}).
+    #    EXTRA_DBS are passed as forced names so host overrides are honoured.
+    local force_b64=""
+    if [ -n "$EXTRA_DBS" ]; then
+        force_b64=$(python3 -c 'import base64,json,sys; print(base64.b64encode(json.dumps([x.strip() for x in sys.argv[1].replace("\n",",").split(",") if x.strip()]).encode()).decode())' "$EXTRA_DBS")
+    fi
+    detect_line=$(python3 "$AGENT_DIR/smart_backup.py" detect "$force_b64" 2>>/var/log/odoo-backup.log \
+                  | grep '^ODOO_BACKUP_DETECT:' | head -n1)
+    if [ -z "$detect_line" ]; then
+        log "ERROR detection produced no database list"; return 1
+    fi
+    targets=$(echo "${detect_line#ODOO_BACKUP_DETECT:}" | base64 -d)
+    n=$(echo "$targets" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+    if [ "$n" -eq 0 ]; then log "no databases to back up"; return 0; fi
+
+    # 2. Back up each database independently — one failure never stops the rest.
+    ok=0
+    local i=0 fields
+    while [ "$i" -lt "$n" ]; do
+        # Pull the i-th target's fields, ONE PER LINE (not tab-separated: `read`
+        # coalesces consecutive tabs, which would drop an empty domain and shift
+        # the port into it). mapfile keeps empty lines, so fields stay aligned.
+        mapfile -t fields < <(echo "$targets" | python3 -c '
+import json,sys
+t=json.load(sys.stdin)[int(sys.argv[1])]
+print(t.get("db",""))
+print(t.get("domain",""))
+print(t.get("port",""))
+' "$i")
+        db="${fields[0]:-}"; domain="${fields[1]:-}"; port="${fields[2]:-}"
+        i=$((i + 1))
+        [ -z "$db" ] && continue
+
+        # Path segment: nginx domain, else <ip>:<port> (or ip). Matches the
+        # manager's server_host._instance_seg exactly.
+        if [ -n "$domain" ]; then
+            seg=$(host_seg "$domain")
+        elif [ -n "$port" ]; then
+            seg=$(host_seg "${HOST_IP}:${port}")
+        else
+            seg=$(host_seg "$HOST_IP")
+        fi
+
+        zip="$WORK_DIR/${db}.zip"
+        rm -f "$zip"
+        if ! python3 "$AGENT_DIR/smart_backup.py" dumpfile "$db" "$zip" \
+                >>/var/log/odoo-backup.log 2>&1; then
+            log "$db FAILED (dump)"; rm -f "$zip"; continue
+        fi
+        if ! unzip -t "$zip" >/dev/null 2>&1; then
+            log "$db FAILED (invalid zip)"; rm -f "$zip"; continue
+        fi
+
+        keyfolder=$(join_key "$PREFIX" "$CATEGORY" "$SERVER_SEG" "$seg" "$db")
+        key="${keyfolder}/${db}_${day}.zip"
+        if s3 put "$zip" "s3://${BUCKET}/${key}" >/dev/null 2>&1; then
+            log "$db uploaded"
+            ok=$((ok + 1))
+            cleanup_old_backups "s3://${BUCKET}/${keyfolder}/"
+        else
+            log "$db FAILED (upload)"
+        fi
+        rm -f "$zip"
+    done
+
+    log "$ok/$n uploaded"
+}
+
+main() {
+    # NEVER leave a backup on the managed server: this EXIT trap wipes the work dir
+    # on ANY exit — success, per-DB error, or a caught signal (INT/TERM). A hard
+    # SIGKILL/power-loss can't run a trap, so backup_all ALSO wipes it at start.
+    trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+    install_dependencies || exit 1
+    write_s3cfg
+    backup_all
+}
+
+main "$@"

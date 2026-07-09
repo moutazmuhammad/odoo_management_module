@@ -35,6 +35,7 @@ GROUP_ADMIN = 'odoo_server_management.group_admin'        # Administrator: + Gen
 SENSITIVE_VAR_KEYS = {
     'github_token', 'admin_password', 'ssh_password', 'master_pwd',
     'db_password', 'public_key', 'private_key',
+    'backup_access_key', 'backup_secret_key',
 }
 
 # A routable domain name (FQDN). Used to tell a domain-named instance from one that
