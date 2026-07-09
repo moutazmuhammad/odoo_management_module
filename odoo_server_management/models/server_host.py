@@ -531,7 +531,12 @@ class ServerHost(models.Model):
     # detects DBs via smart_backup.py, dumps each with the SAME pg_dump->zip path
     # (new `dumpfile` mode), and uploads with s3cmd using an S3 config baked into a
     # root-only /etc/odoo-backup.s3cfg — no per-run manager call to stall on.
-    _AGENT_VERSION = '9'
+    # v10: the shell agent takes its db list from the manager's authoritative
+    # /server_backup/agent/dblist (every stage's DBs) instead of local auto-detect,
+    # which resolved 0 DBs on some remote-PG/dbfilter hosts (they logged "no
+    # databases to back up"); local detect is now only a fallback when the manager
+    # is unreachable. Needs manager_url/host_header in the rendered script.
+    _AGENT_VERSION = '10'
 
     @staticmethod
     def _backup_norm(value):

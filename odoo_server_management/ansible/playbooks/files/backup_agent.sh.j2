@@ -10,9 +10,11 @@
 # for a nightly run to silently stall.
 #
 # Flow:
-#   1. smart_backup.py detect  -> the list of databases on THIS host, each with
-#      its path segment (nginx domain, else ip:port). Same detection the manager
-#      relies on; no manager round-trip needed at run time.
+#   1. Fetch the authoritative db list from the manager (/server_backup/agent/dblist,
+#      auth by source IP) -> EVERY database of EVERY stage, with its path segment
+#      (nginx domain, else ip:port). Falls back to local smart_backup.py detect only
+#      if the manager is unreachable (local auto-detect can resolve 0 DBs on some
+#      remote-PG / dbfilter hosts, which the manager list never does).
 #   2. For each db: smart_backup.py dumpfile -> a LOCAL Odoo-format zip via a
 #      direct pg_dump (NOT /web/database/backup, which saves a corrupt HTML zip
 #      when its own pg_dump fails), validate it, then `s3cmd put` to
@@ -36,6 +38,8 @@ SERVER_SEG="{{ backup_server_seg }}"        # slug of this server's name
 HOST_IP="{{ backup_host_ip }}"              # manager-known public IP
 KEEP={{ keep | default(7) }}                # backups to keep per db folder
 EXTRA_DBS="{{ extra_dbs | default('') }}"   # additive comma list of db names
+MANAGER_URL="{{ manager_url | default('') }}"   # manager base URL (authoritative db list)
+HOST_HEADER="{{ host_header | default('') }}"   # vhost Host header for the manager
 AGENT_DIR="/opt/odoo-backup"
 WORK_DIR="/var/tmp/odoo-backup-work"
 S3CFG="/etc/odoo-backup.s3cfg"
@@ -105,8 +109,44 @@ cleanup_old_backups() {
     done
 }
 
+# The authoritative list of databases to back up: EVERY database of EVERY stage
+# on this host, with its path segment (nginx domain, else ip:port). Fetched from
+# the manager (same source the old agent used) so nothing is silently missed —
+# local auto-detect can resolve 0 DBs on some hosts (remote-PG / dbfilter setups),
+# which is why we prefer the manager list and only FALL BACK to local detect when
+# the manager can't be reached. Prints a json list [{db,domain,port},...].
+fetch_targets() {
+    local resp js force_b64 line
+    if [ -n "$MANAGER_URL" ]; then
+        # --post30x keeps the POST across the manager's http->https 301 redirect
+        # (nginx by-IP vhost). -k tolerates an old CA bundle on the http->https hop;
+        # the manager authenticates us by source IP and only returns a db list.
+        resp=$(curl -sS -k -L --post301 --post302 --post303 --max-time 60 \
+                 -H "Content-Type: application/json" \
+                 ${HOST_HEADER:+-H "Host: $HOST_HEADER"} \
+                 -d '{"jsonrpc":"2.0","method":"call","params":{}}' \
+                 "$MANAGER_URL/server_backup/agent/dblist" 2>/dev/null)
+        js=$(printf '%s' "$resp" | python3 -c '
+import json,sys
+try:
+    t=(json.load(sys.stdin).get("result") or {}).get("targets") or []
+    if t: print(json.dumps(t))
+except Exception: pass' 2>/dev/null)
+        if [ -n "$js" ]; then echo "$js"; return 0; fi
+        log "manager dblist unavailable/empty; falling back to local detect"
+    fi
+    # Fallback: local auto-detect (+ EXTRA_DBS forced by name).
+    if [ -n "$EXTRA_DBS" ]; then
+        force_b64=$(python3 -c 'import base64,json,sys; print(base64.b64encode(json.dumps([x.strip() for x in sys.argv[1].replace("\n",",").split(",") if x.strip()]).encode()).decode())' "$EXTRA_DBS")
+    fi
+    line=$(python3 "$AGENT_DIR/smart_backup.py" detect "${force_b64:-}" 2>>/var/log/odoo-backup.log \
+             | grep '^ODOO_BACKUP_DETECT:' | head -n1)
+    [ -z "$line" ] && { echo '[]'; return; }
+    echo "${line#ODOO_BACKUP_DETECT:}" | base64 -d
+}
+
 backup_all() {
-    local day detect_line targets n ok db domain port seg keyfolder key zip
+    local day targets n ok db domain port seg keyfolder key zip
     day=$(date +%Y-%m-%d)
     # Start clean: wipe any leftover from a previous run that was hard-killed
     # (OOM / reboot / timeout) BEFORE its EXIT trap could fire, so a stale zip is
@@ -117,19 +157,11 @@ backup_all() {
     # so nothing it writes can be left behind either.
     export ODOO_BACKUP_TMPDIR="$WORK_DIR"
 
-    # 1. Detect this host's databases (base64 json list of {db,domain,port,...}).
-    #    EXTRA_DBS are passed as forced names so host overrides are honoured.
-    local force_b64=""
-    if [ -n "$EXTRA_DBS" ]; then
-        force_b64=$(python3 -c 'import base64,json,sys; print(base64.b64encode(json.dumps([x.strip() for x in sys.argv[1].replace("\n",",").split(",") if x.strip()]).encode()).decode())' "$EXTRA_DBS")
-    fi
-    detect_line=$(python3 "$AGENT_DIR/smart_backup.py" detect "$force_b64" 2>>/var/log/odoo-backup.log \
-                  | grep '^ODOO_BACKUP_DETECT:' | head -n1)
-    if [ -z "$detect_line" ]; then
-        log "ERROR detection produced no database list"; return 1
-    fi
-    targets=$(echo "${detect_line#ODOO_BACKUP_DETECT:}" | base64 -d)
-    n=$(echo "$targets" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+    # 1. Authoritative database list (manager first, local detect fallback).
+    targets=$(fetch_targets)
+    n=$(echo "$targets" | python3 -c 'import json,sys
+try: print(len(json.load(sys.stdin)))
+except Exception: print(0)')
     if [ "$n" -eq 0 ]; then log "no databases to back up"; return 0; fi
 
     # 2. Back up each database independently — one failure never stops the rest.
