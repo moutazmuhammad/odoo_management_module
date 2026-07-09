@@ -11,6 +11,28 @@ dbfilter when present.
 """
 import sys, re, base64, json, subprocess, shlex
 
+# A real PostgreSQL/Odoo database name never contains regex/dbfilter metacharacters.
+# A misconfigured conf can carry a dbfilter-style value in db_name (e.g.
+# 'odex25_std_dev_db.*$'); this pattern spots such values so we resolve them as a
+# filter instead of returning the raw regex as if it were a database (which would
+# then become a bogus, un-backupable target on the manager).
+REGEX_META = re.compile(r'[*^$()\[\]+?\\|]|\.\*')
+
+
+def _stem(f):
+    """Literal base name of a dbfilter/regexy db_name ('x_db.*$' -> 'x_db'); '' if
+    it uses % placeholders or still has regex metacharacters after stripping."""
+    f = (f or '').strip()
+    if not f or '%' in f:
+        return ''
+    if f.startswith('^'):
+        f = f[1:]
+    if f.endswith('$'):
+        f = f[:-1]
+    if f.endswith('.*'):
+        f = f[:-2]
+    return '' if REGEX_META.search(f) else f
+
 
 def conf_get(conf, key):
     try:
@@ -91,14 +113,31 @@ def list_for(conf, odoo_user):
             break
 
     dbs = [l.strip() for l in out.splitlines() if l.strip()]
-    if is_set(db_name):
+    if is_set(db_name) and not REGEX_META.search(db_name):
+        # Plain single-db config: trust it verbatim (it may be a remote database
+        # not owned by db_user, so it need not appear in the query result above).
         dbs = [db_name]
+    elif is_set(db_name):
+        # db_name is misconfigured with dbfilter/regex syntax (e.g. 'x_db.*$'):
+        # NEVER return that string as a database. Resolve it like a filter — the
+        # literal stem if it exists, else the databases it matches.
+        stem = _stem(db_name)
+        if stem and stem in dbs:
+            dbs = [stem]
+        else:
+            try:
+                dbs = [d for d in dbs if re.match(db_name, d)]
+            except re.error:
+                dbs = [d for d in dbs if stem and d.startswith(stem)]
     elif dbfilter and '%' not in dbfilter:
         try:
             dbs = [d for d in dbs if re.match(dbfilter, d)]
         except re.error:
             pass
-    return dbs
+    # Final guard: a database name never contains regex metacharacters, so a bogus
+    # entry (from a misconfigured conf) can never escape into the manager's target
+    # list regardless of which branch produced it.
+    return [d for d in dbs if not REGEX_META.search(d)]
 
 
 try:

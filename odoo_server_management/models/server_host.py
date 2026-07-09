@@ -299,7 +299,14 @@ class ServerHost(models.Model):
             return
         now = fields.Datetime.now()
         for st in stages.sudo():          # sudo: operators can discover but lack stage write
-            dbs = dbmap.get(str(st.id)) or []
+            # Belt-and-suspenders sanitizer: a real database name never contains
+            # regex/dbfilter metacharacters, so drop any such entry before storing it
+            # (a misconfigured conf can carry a dbfilter-style value like
+            # 'x_db.*$' in db_name — which would otherwise become a bogus, permanently
+            # un-backupable target that keeps the server red). Also retro-cleans any
+            # bad entry already stored, on the next 15-min refresh.
+            dbs = [d for d in (dbmap.get(str(st.id)) or [])
+                   if re.match(r'^[A-Za-z0-9][A-Za-z0-9_.\-]*$', d)]
             st.available_databases = "\n".join(dbs)
             st.databases_updated = now
 
