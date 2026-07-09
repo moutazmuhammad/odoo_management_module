@@ -64,6 +64,26 @@ class BackupAgentController(http.Controller):
             return {'error': 'unknown host (source IP not recognised)'}
         return {'targets': host._backup_targets()}
 
+    @http.route('/server_backup/agent/report', type='json', auth='public',
+                methods=['POST'], csrf=False)
+    def report(self, token=None, **kw):
+        """Called by the shell agent once it has finished uploading this host's
+        backups. It reconciles the host's backup flags against the bucket (stamps
+        last_backup for the host + each freshly-backed-up instance, clears review)
+        so the Servers/Instances list turns green immediately — the s3cmd upload
+        itself never touches the manager, so without this the record would stay red
+        until the daily 08:00 verify cron."""
+        host = self._host_for_request(token)
+        if not host:
+            return {'error': 'unknown host (source IP not recognised)'}
+        try:
+            host._reconcile_backup_state()
+            request.env.cr.commit()
+        except Exception:  # noqa: BLE001 — the backups are safe in the bucket regardless
+            _logger.exception("agent report reconcile failed for %s", host.name)
+            return {'error': 'reconcile failed'}
+        return {'ok': True}
+
     @http.route('/server_backup/agent/presign', type='json', auth='public',
                 methods=['POST'], csrf=False)
     def presign(self, token=None, dbs=None, **kw):

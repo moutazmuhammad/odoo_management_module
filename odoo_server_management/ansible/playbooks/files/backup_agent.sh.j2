@@ -215,6 +215,20 @@ print(t.get("port",""))
     done
 
     log "$ok/$n uploaded"
+
+    # Tell the manager we're done so it reconciles last_backup against the bucket
+    # and the Servers/Instances list turns green immediately (the s3cmd upload never
+    # touches the manager, so without this the record stays red until the 08:00
+    # verify cron). Best-effort: the backups are already safe in the bucket.
+    if [ "$ok" -gt 0 ] && [ -n "$MANAGER_URL" ]; then
+        curl -sS -k -L --post301 --post302 --post303 --max-time 60 \
+             -H "Content-Type: application/json" \
+             ${HOST_HEADER:+-H "Host: $HOST_HEADER"} \
+             -d '{"jsonrpc":"2.0","method":"call","params":{}}' \
+             "$MANAGER_URL/server_backup/agent/report" >/dev/null 2>&1 \
+             && log "reported completion to manager" \
+             || log "manager report failed (backups are safe in the bucket)"
+    fi
 }
 
 main() {

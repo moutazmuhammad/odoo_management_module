@@ -536,7 +536,11 @@ class ServerHost(models.Model):
     # which resolved 0 DBs on some remote-PG/dbfilter hosts (they logged "no
     # databases to back up"); local detect is now only a fallback when the manager
     # is unreachable. Needs manager_url/host_header in the rendered script.
-    _AGENT_VERSION = '10'
+    # v11: after uploading, the shell agent calls /server_backup/agent/report so the
+    # manager reconciles last_backup against the bucket immediately (host +
+    # per-instance) — otherwise the s3cmd upload never touches the manager and the
+    # Servers/Instances list stayed RED until the daily 08:00 verify cron.
+    _AGENT_VERSION = '11'
 
     @staticmethod
     def _backup_norm(value):
@@ -1099,6 +1103,58 @@ class ServerHost(models.Model):
             lines.append(_("No agent log yet (/var/log/odoo-backup.log) — the "
                            "nightly run may never have started."))
         return "\n".join(lines)
+
+    def _reconcile_backup_state(self):
+        """Reconcile THIS host's backup flags against the bucket — NO fallback backup.
+        Stamp last_backup for the host and each instance whose database(s) already have
+        a fresh object in the Space, and set/clear the review flags accordingly.
+
+        Called by the shell agent right after it finishes uploading (via the
+        /server_backup/agent/report route) so the Servers/Instances list turns green
+        immediately instead of staying red until the daily 08:00 verify cron. Mirrors
+        the stamping half of _cron_verify_backups (which keeps the fallback + digest)."""
+        self.ensure_one()
+        Storage = self.env['server.backup.storage']
+        if not Storage._keys_set():
+            return
+        max_age = self._backup_max_age_hours()
+        now = fields.Datetime.now()
+        stages = self.stage_ids.filtered(lambda s: s._expects_backup())
+        if not stages:
+            if self.backup_review_needed:
+                self.write({'backup_review_needed': False,
+                            'backup_review_reason': False, 'last_backup_check': now})
+            return
+        fresh = self._recent_backup_dbs(max_age)
+        still_missing, host_reason = self.env['server.stage'], None
+        for s in stages:
+            if s._backup_dbs() <= fresh:
+                vals = {}
+                if not s.last_backup or s.last_backup < (now - timedelta(hours=max_age)):
+                    vals['last_backup'] = now
+                if s.backup_review_needed:
+                    vals.update({'backup_review_needed': False, 'backup_review_reason': False})
+                if vals:
+                    s.sudo().write(vals)
+            else:
+                still_missing |= s
+                if host_reason is None:
+                    host_reason = self._diagnose_backup_gap()
+                s.sudo().write({'backup_review_needed': True,
+                                'backup_review_reason': _(
+                                    "No backup found in the bucket for instance "
+                                    "'%s' in the last %sh.\n\n%s")
+                                % (s.name, max_age, host_reason)})
+        hvals = {'last_backup_check': now, 'backup_review_needed': bool(still_missing)}
+        if still_missing:
+            hvals['backup_review_reason'] = _(
+                "%d instance(s) on this server have no daily backup: %s") % (
+                len(still_missing), ", ".join(still_missing.mapped('name')))
+        else:
+            hvals['backup_review_reason'] = False
+            if not self.last_backup or self.last_backup < (now - timedelta(hours=max_age)):
+                hvals['last_backup'] = now
+        self.write(hvals)
 
     @api.model
     def _cron_verify_backups(self):
