@@ -19,7 +19,10 @@
 #      direct pg_dump (NOT /web/database/backup, which saves a corrupt HTML zip
 #      when its own pg_dump fails), validate it, then `s3cmd put` to
 #          <prefix>/<category>/<server>/<domain-or-ip:port>/<db>/<db>_<date>.zip
-#   3. Keep the newest {{ keep }} objects per db folder; delete older ones.
+#   3. Prune each db folder by AGE — delete backups older than the retention
+#      window (days), always keeping the newest. The window is the manager's
+#      current "Retention (days)" setting (fetched at run time), so a change to it
+#      takes effect on the next run without a redeploy.
 #
 # EVERYTHING below the CONFIG block is rendered verbatim — only the values in
 # CONFIG are templated, so the logic stays identical across hosts.
@@ -36,7 +39,8 @@ PREFIX="{{ backup_prefix | default('') }}"  # optional global key prefix
 CATEGORY="{{ backup_category | default('odex') }}"
 SERVER_SEG="{{ backup_server_seg }}"        # slug of this server's name
 HOST_IP="{{ backup_host_ip }}"              # manager-known public IP
-KEEP={{ keep | default(7) }}                # backups to keep per db folder
+RETENTION_DAYS={{ keep | default(7) }}      # delete backups older than N days (per db);
+                                            # a runtime value from the manager overrides this
 EXTRA_DBS="{{ extra_dbs | default('') }}"   # additive comma list of db names
 MANAGER_URL="{{ manager_url | default('') }}"   # manager base URL (authoritative db list)
 HOST_HEADER="{{ host_header | default('') }}"   # vhost Host header for the manager
@@ -95,18 +99,39 @@ join_key() {
     echo "$out"
 }
 
-# Keep only the newest $KEEP objects under an s3 folder; delete the rest.
+# Delete backups older than RETENTION_DAYS under an s3 db-folder, but ALWAYS keep
+# the single newest (so a database that stops being backed up never loses its last
+# copy — the same floor the manager's _prune uses). Age comes from the YYYY-MM-DD
+# embedded in each key (<db>_<date>.zip), so it is timezone-proof and needs no
+# object-metadata lookups. RETENTION_DAYS<=0 disables pruning (keep everything).
 cleanup_old_backups() {
-    local folder="$1" files count to_delete
-    files=$(s3 ls "$folder" | sort | awk '{print $NF}' | grep -E '\.zip$' || true)
+    local folder="$1" files f d e age today_epoch newest_e=0 newest_f=""
+    [ "${RETENTION_DAYS:-0}" -le 0 ] 2>/dev/null && return 0
+    files=$(s3 ls "$folder" | awk '{print $NF}' | grep -E '\.zip$' || true)
     [ -z "$files" ] && return 0
-    count=$(echo "$files" | wc -l)
-    to_delete=$((count - KEEP))
-    [ "$to_delete" -le 0 ] && return 0
-    log "pruning $to_delete old backup(s) under $folder"
-    echo "$files" | head -n "$to_delete" | while read -r f; do
-        [ -n "$f" ] && { s3 del "$f" >/dev/null 2>&1 || log "failed to delete $f"; }
-    done
+    today_epoch=$(date -u +%s)
+    # Pass 1: find the newest backup (by embedded date) — always kept.
+    while read -r f; do
+        [ -z "$f" ] && continue
+        d=$(echo "$f" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | tail -n1)
+        [ -z "$d" ] && continue
+        e=$(date -u -d "$d" +%s 2>/dev/null) || continue
+        [ "$e" -gt "$newest_e" ] && { newest_e=$e; newest_f=$f; }
+    done <<< "$files"
+    # Pass 2: delete anything older than the window, except that newest one.
+    while read -r f; do
+        [ -z "$f" ] && continue
+        [ "$f" = "$newest_f" ] && continue
+        d=$(echo "$f" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | tail -n1)
+        [ -z "$d" ] && continue
+        e=$(date -u -d "$d" +%s 2>/dev/null) || continue
+        age=$(( (today_epoch - e) / 86400 ))
+        if [ "$age" -gt "$RETENTION_DAYS" ]; then
+            s3 del "$f" >/dev/null 2>&1 \
+                && log "pruned $(basename "$f") (${age}d old > ${RETENTION_DAYS}d)" \
+                || log "failed to delete $f"
+        fi
+    done <<< "$files"
 }
 
 # The authoritative list of databases to back up: EVERY database of EVERY stage
@@ -132,6 +157,18 @@ try:
     t=(json.load(sys.stdin).get("result") or {}).get("targets") or []
     if t: print(json.dumps(t))
 except Exception: pass' 2>/dev/null)
+        # The current "Retention (days)" setting travels with the list, so a change
+        # to it applies on the NEXT run (no redeploy) — overrides the baked default.
+        local rt
+        rt=$(printf '%s' "$resp" | python3 -c '
+import json,sys
+try:
+    v=(json.load(sys.stdin).get("result") or {}).get("retention_days")
+    print(int(v) if v not in (None,"",False) else "")
+except Exception: pass' 2>/dev/null)
+        # fetch_targets runs in a command-substitution subshell, so hand the value
+        # to the parent via a file (a plain var assignment here would be lost).
+        [ -n "$rt" ] && echo "$rt" > "$WORK_DIR/.retention" 2>/dev/null
         if [ -n "$js" ]; then echo "$js"; return 0; fi
         log "manager dblist unavailable/empty; falling back to local detect"
     fi
@@ -158,7 +195,11 @@ backup_all() {
     export ODOO_BACKUP_TMPDIR="$WORK_DIR"
 
     # 1. Authoritative database list (manager first, local detect fallback).
+    #    fetch_targets also drops the manager's current retention window in
+    #    .retention — pick it up so a setting change applies without a redeploy.
+    rm -f "$WORK_DIR/.retention"
     targets=$(fetch_targets)
+    [ -s "$WORK_DIR/.retention" ] && RETENTION_DAYS=$(cat "$WORK_DIR/.retention")
     n=$(echo "$targets" | python3 -c 'import json,sys
 try: print(len(json.load(sys.stdin)))
 except Exception: print(0)')

@@ -547,7 +547,11 @@ class ServerHost(models.Model):
     # manager reconciles last_backup against the bucket immediately (host +
     # per-instance) — otherwise the s3cmd upload never touches the manager and the
     # Servers/Instances list stayed RED until the daily 08:00 verify cron.
-    _AGENT_VERSION = '11'
+    # v12: the agent prunes by AGE (delete backups older than "Retention (days)",
+    # keeping the newest) instead of keeping a fixed COUNT of files — the count-based
+    # cleanup ignored the days setting. Retention now travels in the dblist response
+    # so a setting change applies on the next run without a redeploy.
+    _AGENT_VERSION = '12'
 
     @staticmethod
     def _backup_norm(value):

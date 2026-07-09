@@ -62,7 +62,11 @@ class BackupAgentController(http.Controller):
         host = self._host_for_request(token)
         if not host:
             return {'error': 'unknown host (source IP not recognised)'}
-        return {'targets': host._backup_targets()}
+        # Ship the retention window with the list so a change to the "Retention
+        # (days)" setting takes effect on the NEXT run — the agent prunes by age
+        # using this value, instead of a number baked in at deploy time.
+        return {'targets': host._backup_targets(),
+                'retention_days': request.env['server.backup.storage'].sudo()._retention_days()}
 
     @http.route('/server_backup/agent/report', type='json', auth='public',
                 methods=['POST'], csrf=False)
