@@ -1058,6 +1058,14 @@ class ServerHost(models.Model):
                     _logger.exception("Pre-backup DB refresh failed for host %s",
                                       host.id)
                 host._run_daily_backup()
+                # _run_daily_backup only stamps the HOST; reconcile so each INSTANCE
+                # whose db(s) just landed in the bucket turns green immediately too,
+                # instead of showing red until the daily verify cron.
+                try:
+                    host._reconcile_backup_state()
+                except Exception:
+                    _logger.exception("Post-backup reconcile failed for host %s",
+                                      host.id)
                 self.env.cr.commit()
             except Exception:
                 self.env.cr.rollback()
@@ -1148,6 +1156,12 @@ class ServerHost(models.Model):
         Storage = self.env['server.backup.storage']
         if not Storage._keys_set():
             return
+        # daily_age (~20h) decides freshness; max_age (28h) is only for the RED flag
+        # and the review message. Same two windows the monitor uses — see
+        # _backup_daily_age_hours(). Stamping a confirmed-fresh backup at `now`
+        # (unconditionally, not only when already stale) is what stops a stage from
+        # ageing into 'overdue' between the nightly agent run and the daily monitor.
+        daily_age = self._backup_daily_age_hours()
         max_age = self._backup_max_age_hours()
         now = fields.Datetime.now()
         stages = self.stage_ids.filtered(lambda s: s._expects_backup())
@@ -1156,17 +1170,14 @@ class ServerHost(models.Model):
                 self.write({'backup_review_needed': False,
                             'backup_review_reason': False, 'last_backup_check': now})
             return
-        fresh = self._recent_backup_dbs(max_age)
+        fresh = self._recent_backup_dbs(daily_age)
         still_missing, host_reason = self.env['server.stage'], None
         for s in stages:
             if s._backup_dbs() <= fresh:
-                vals = {}
-                if not s.last_backup or s.last_backup < (now - timedelta(hours=max_age)):
-                    vals['last_backup'] = now
+                vals = {'last_backup': now}
                 if s.backup_review_needed:
                     vals.update({'backup_review_needed': False, 'backup_review_reason': False})
-                if vals:
-                    s.sudo().write(vals)
+                s.sudo().write(vals)
             else:
                 still_missing |= s
                 if host_reason is None:
@@ -1183,8 +1194,7 @@ class ServerHost(models.Model):
                 len(still_missing), ", ".join(still_missing.mapped('name')))
         else:
             hvals['backup_review_reason'] = False
-            if not self.last_backup or self.last_backup < (now - timedelta(hours=max_age)):
-                hvals['last_backup'] = now
+            hvals['last_backup'] = now
         self.write(hvals)
 
     @api.model
