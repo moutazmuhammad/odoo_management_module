@@ -51,3 +51,59 @@ class StageAccess(models.Model):
     def name_get(self):
         return [(r.id, '%s → %s' % (r.stage_id.name or '', r.user_id.name or ''))
                 for r in self]
+
+    # ------------------------------------------------------------------
+    # Matrix materialisation (Jenkins-style grid)
+    # ------------------------------------------------------------------
+    @api.model
+    def _developer_users(self):
+        """Users the grid is about: module Developers who are NOT DevOps/Admin
+        (DevOps/Admin bypass grants, so putting them in the grid is misleading)."""
+        group_user = self.env.ref('odoo_server_management.group_user')
+        group_devops = self.env.ref('odoo_server_management.group_devops')
+        return group_user.users - group_devops.users
+
+    @api.model
+    def _sync_matrix(self):
+        """Ensure a grant row exists for every (developer, stage) pair, so the
+        Access page shows the FULL grid — every user against every stage — with
+        no manual record creation. Missing rows are created with the current
+        effective default (View always ON; the four actions ON for a normal
+        instance, OFF for a Client Server), so materialising the grid changes no
+        behaviour until an admin flips a toggle. Returns the number created."""
+        Access = self.sudo()
+        users = self._developer_users()
+        stages = self.env['server.stage'].sudo().search([])
+        if not users or not stages:
+            return 0
+        existing = Access.search_read(
+            [('user_id', 'in', users.ids), ('stage_id', 'in', stages.ids)],
+            ['user_id', 'stage_id'])
+        have = {(r['user_id'][0], r['stage_id'][0]) for r in existing}
+        vals = []
+        for st in stages:
+            allow = not st.client_stage
+            for u in users:
+                if (u.id, st.id) not in have:
+                    vals.append({
+                        'stage_id': st.id, 'user_id': u.id, 'can_read': True,
+                        'can_pull': allow, 'can_backup': allow,
+                        'can_upgrade': allow, 'can_control': allow,
+                    })
+        if vals:
+            Access.create(vals)
+        return len(vals)
+
+    def action_sync_matrix(self):
+        """Header button on the Access list: (re)build the grid, then reopen it
+        so any newly-added users or stages appear as rows."""
+        created = self._sync_matrix()
+        action = self.env['ir.actions.act_window']._for_xml_id(
+            'odoo_server_management.action_stage_access')
+        action['context'] = {'search_default_group_stage': 1}
+        msg = (_("Added %s new row(s).") % created) if created else _("Grid is already up to date.")
+        action['name'] = 'Access'
+        self.env['bus.bus']._sendone(
+            self.env.user.partner_id, 'simple_notification',
+            {'type': 'success', 'title': _('Access'), 'message': msg})
+        return action

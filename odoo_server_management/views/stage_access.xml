@@ -7,7 +7,14 @@
         <field name="name">server.stage.access.tree</field>
         <field name="model">server.stage.access</field>
         <field name="arch" type="xml">
-            <tree string="Access" editable="bottom" default_order="stage_id, user_id">
+            <tree string="Access" editable="bottom" create="false"
+                  default_order="stage_id, user_id">
+                <header>
+                    <button name="action_sync_matrix" type="object"
+                            string="Refresh Users &amp; Stages" class="btn-primary"
+                            icon="fa-refresh"
+                            help="Rebuild the grid so newly-added users and instances appear."/>
+                </header>
                 <field name="stage_id"
                        options="{'no_create': True, 'no_open': True}"/>
                 <field name="client_stage" widget="boolean_toggle" readonly="1"
@@ -90,9 +97,23 @@
         </field>
     </record>
 
+    <!-- Menu entry point: materialise the full grid (all developers × all
+         stages), then open the editable list. So the page ALWAYS shows every
+         user against every stage — no manual record creation. -->
+    <record id="action_stage_access_open" model="ir.actions.server">
+        <field name="name">Access</field>
+        <field name="model_id" ref="model_server_stage_access"/>
+        <field name="binding_type">action</field>
+        <field name="state">code</field>
+        <field name="code">
+model._sync_matrix()
+action = env['ir.actions.act_window']._for_xml_id('odoo_server_management.action_stage_access')
+        </field>
+    </record>
+
     <menuitem id="menu_stage_access" name="Access"
               parent="menu_server_management"
-              action="action_stage_access" sequence="25"
+              action="action_stage_access_open" sequence="25"
               groups="odoo_server_management.group_devops"/>
 
 </odoo>
