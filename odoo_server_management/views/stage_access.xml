@@ -97,6 +97,19 @@
         </field>
     </record>
 
+    <!-- Always-visible "Refresh Users & Stages" in the list ⚙️ Action menu
+         (no row selection needed): rebuilds the grid so any missing (user,stage)
+         rows appear. The header button above does the same but only shows once a
+         row is ticked. -->
+    <record id="action_stage_access_refresh" model="ir.actions.server">
+        <field name="name">Refresh Users &amp; Stages</field>
+        <field name="model_id" ref="model_server_stage_access"/>
+        <field name="binding_model_id" ref="model_server_stage_access"/>
+        <field name="binding_view_types">list</field>
+        <field name="state">code</field>
+        <field name="code">action = model.action_sync_matrix()</field>
+    </record>
+
     <!-- Menu entry point: materialise the full grid (all developers × all
          stages), then open the editable list. So the page ALWAYS shows every
          user against every stage — no manual record creation. -->
