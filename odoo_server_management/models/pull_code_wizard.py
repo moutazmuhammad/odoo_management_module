@@ -44,7 +44,7 @@ class PullCodeWizard(models.TransientModel):
         self.branch_id = self.repo_branch_path_id.branch_id
 
     def action_confirm_pull(self):
-        self.stage_id._check_action_access()
+        self.stage_id._check_action_access('pull')
         self = self.sudo()
         self.ensure_one()
         stage = self.stage_id

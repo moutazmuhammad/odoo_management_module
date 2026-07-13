@@ -70,7 +70,7 @@ class ServerBackupDatabaseWizard(models.TransientModel):
                 ) % rec.db_name)
 
     def action_backup(self):
-        self.stage_id._check_action_access()
+        self.stage_id._check_action_access('backup')
         self.ensure_one()
         if not (self.db_name or '').strip():
             raise UserError(_("Choose a database from the list or type one."))

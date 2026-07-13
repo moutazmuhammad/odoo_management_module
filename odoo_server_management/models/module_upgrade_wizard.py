@@ -137,7 +137,7 @@ class UpgradeModuleWizard(models.TransientModel):
                     ) % val)
 
     def action_upgrade(self):
-        self.stage_id._check_action_access()
+        self.stage_id._check_action_access('upgrade')
         self.ensure_one()
         if not (self.database_name or '').strip():
             raise UserError(_("Choose a database from the list or type one."))
