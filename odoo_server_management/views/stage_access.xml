@@ -15,11 +15,12 @@
                             icon="fa-refresh"
                             help="Rebuild the grid so newly-added users and instances appear."/>
                 </header>
-                <field name="stage_id"
+                <field name="stage_id" readonly="1"
                        options="{'no_create': True, 'no_open': True}"/>
                 <field name="client_stage" widget="boolean_toggle" readonly="1"
                        optional="show"/>
-                <field name="user_id" options="{'no_create': True, 'no_open': True}"/>
+                <field name="user_id" readonly="1"
+                       options="{'no_create': True, 'no_open': True}"/>
                 <field name="can_read" widget="boolean_toggle"/>
                 <field name="can_pull" widget="boolean_toggle"/>
                 <field name="can_backup" widget="boolean_toggle"/>
@@ -37,9 +38,9 @@
                 <sheet>
                     <group>
                         <group>
-                            <field name="stage_id"
+                            <field name="stage_id" readonly="1"
                                    options="{'no_create': True, 'no_open': True}"/>
-                            <field name="user_id"
+                            <field name="user_id" readonly="1"
                                    options="{'no_create': True, 'no_open': True}"/>
                             <field name="client_stage" readonly="1"/>
                         </group>
