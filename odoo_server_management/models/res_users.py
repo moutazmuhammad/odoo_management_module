@@ -1,6 +1,6 @@
 import re
 
-from odoo import models, api, _
+from odoo import models, fields, api, _
 from odoo.exceptions import UserError
 
 # config-parameter keys
@@ -9,6 +9,20 @@ PARAM_DOMAINS = 'server.signup.allowed_domains'
 
 class ResUsers(models.Model):
     _inherit = 'res.users'
+
+    # Stages this user is explicitly denied View on (a grant row with can_read
+    # OFF). Used by the server.stage record rule to hide them. Non-stored (it is
+    # per-user and small) and computed with sudo so a plain Developer can resolve
+    # their own record rule without ACL on the grant model.
+    stage_denied_ids = fields.Many2many(
+        'server.stage', compute='_compute_stage_denied_ids',
+        string='Hidden Stages')
+
+    def _compute_stage_denied_ids(self):
+        Access = self.env['server.stage.access'].sudo()
+        for user in self:
+            rows = Access.search([('user_id', '=', user.id), ('can_read', '=', False)])
+            user.stage_denied_ids = rows.mapped('stage_id')
 
     @api.model
     def _signup_allowed_domains(self):

@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- The single 'Access' page: one row per (user, stage) with the five
+         per-action toggles. DevOps/Admin only (see the menu group + ACL). -->
+    <record id="view_stage_access_tree" model="ir.ui.view">
+        <field name="name">server.stage.access.tree</field>
+        <field name="model">server.stage.access</field>
+        <field name="arch" type="xml">
+            <tree string="Access" editable="bottom" default_order="stage_id, user_id">
+                <field name="stage_id"
+                       options="{'no_create': True, 'no_open': True}"/>
+                <field name="client_stage" widget="boolean_toggle" readonly="1"
+                       optional="show"/>
+                <field name="user_id" options="{'no_create': True, 'no_open': True}"/>
+                <field name="can_read" widget="boolean_toggle"/>
+                <field name="can_pull" widget="boolean_toggle"/>
+                <field name="can_backup" widget="boolean_toggle"/>
+                <field name="can_upgrade" widget="boolean_toggle"/>
+                <field name="can_control" widget="boolean_toggle"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_stage_access_form" model="ir.ui.view">
+        <field name="name">server.stage.access.form</field>
+        <field name="model">server.stage.access</field>
+        <field name="arch" type="xml">
+            <form string="Access Grant">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="stage_id"
+                                   options="{'no_create': True, 'no_open': True}"/>
+                            <field name="user_id"
+                                   options="{'no_create': True, 'no_open': True}"/>
+                            <field name="client_stage" readonly="1"/>
+                        </group>
+                        <group string="Allowed actions">
+                            <field name="can_read"/>
+                            <field name="can_pull"/>
+                            <field name="can_backup"/>
+                            <field name="can_upgrade"/>
+                            <field name="can_control"/>
+                        </group>
+                    </group>
+                    <p class="text-muted">
+                        View OFF hides this instance from the user entirely.
+                        With no row at all: a normal instance allows every action,
+                        a Client Server allows none (read-only). DevOps and
+                        Administrators always have full access regardless of rows.
+                    </p>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_stage_access_search" model="ir.ui.view">
+        <field name="name">server.stage.access.search</field>
+        <field name="model">server.stage.access</field>
+        <field name="arch" type="xml">
+            <search string="Access">
+                <field name="user_id"/>
+                <field name="stage_id"/>
+                <filter name="client" string="Client Servers"
+                        domain="[('client_stage', '=', True)]"/>
+                <filter name="normal" string="Normal Instances"
+                        domain="[('client_stage', '=', False)]"/>
+                <group expand="0" string="Group By">
+                    <filter name="group_stage" string="Stage"
+                            context="{'group_by': 'stage_id'}"/>
+                    <filter name="group_user" string="User"
+                            context="{'group_by': 'user_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_stage_access" model="ir.actions.act_window">
+        <field name="name">Access</field>
+        <field name="res_model">server.stage.access</field>
+        <field name="view_mode">tree,form</field>
+        <field name="search_view_id" ref="view_stage_access_search"/>
+        <field name="context">{'search_default_group_stage': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Grant per-user access to an instance</p>
+            <p>Add a row to give a specific user actions on a specific instance. A
+               brand-new row starts fully allowed; switch OFF what they should not do.
+               Client Server instances are read-only until you add a row.</p>
+        </field>
+    </record>
+
+    <menuitem id="menu_stage_access" name="Access"
+              parent="menu_server_management"
+              action="action_stage_access" sequence="25"
+              groups="odoo_server_management.group_devops"/>
+
+</odoo>

@@ -6,33 +6,25 @@
         <field name="description">Access levels for the Server Management module</field>
     </record>
 
-    <!-- Developer: act on (non-client) instances; see only Branch Configuration
-         + Backups + the action buttons. No servers, no settings, no secrets. -->
+    <!-- Developer: act on instances subject to the per-user, per-stage grants on
+         the 'Access' page. Normal instances are actionable by default; Client
+         Server instances are read-only until granted. No servers, no settings,
+         no secrets. -->
     <record id="group_user" model="res.groups">
         <field name="name">Developer</field>
         <field name="category_id" ref="group_category_project_roles"/>
     </record>
 
-    <!-- Tech Lead: a Developer who may ALSO run the operational actions on
-         Client Server stages (Start/Stop/Restart, Backup, Upgrade, Pull Code,
-         Branch Config) — the same buttons a Developer gets on normal instances,
-         extended to client servers. Still NO server management, Discover, agent
-         install, or settings (those stay DevOps/Admin). Sees every stage. -->
-    <record id="group_tech_lead" model="res.groups">
-        <field name="name">Tech Lead</field>
-        <field name="category_id" ref="group_category_project_roles"/>
-        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
-    </record>
-
     <!-- DevOps: everything EXCEPT the General Settings menu — manage Servers
-         (create), run Discover Instances, Install Self-Backup Agent, act on
-         Client Server stages, all server buttons (Test Connection, Check Status,
+         (create), run Discover Instances, Install Self-Backup Agent, manage the
+         per-user Access page, all server buttons (Test Connection, Check Status,
          Terminal, Run Backup Now), all stage pages, repository management.
-         DevOps is a superset of Tech Lead (which is a superset of Developer). -->
+         DevOps bypasses the per-stage grants (every action on every stage).
+         DevOps is a superset of Developer. -->
     <record id="group_devops" model="res.groups">
         <field name="name">DevOps</field>
         <field name="category_id" ref="group_category_project_roles"/>
-        <field name="implied_ids" eval="[(4, ref('group_tech_lead'))]"/>
+        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
     </record>
 
     <!-- Administrator: DevOps + the global General Settings. -->
@@ -42,10 +34,11 @@
         <field name="implied_ids" eval="[(4, ref('group_devops'))]"/>
     </record>
 
-    <!-- Record rules: Developers may READ every stage, including Client Server /
-         DevOps-only hosts (see rule_stage_developer) — the model ACL keeps them
-         read-only and can_act keeps the action buttons Tech Lead+. Servers
-         themselves stay visible only to DevOps/Admins, who see all of them. -->
+    <!-- Record rules: Developers READ every stage by default (they see the
+         instance + its logs), EXCEPT any stage on which their own grant row sets
+         View OFF (user.stage_denied_ids). The model ACL keeps them read-only and
+         the per-action grants gate the action buttons. Servers themselves stay
+         visible only to DevOps/Admins, who see all of them and bypass the grants. -->
     <record id="rule_host_devops_all" model="ir.rule">
         <field name="name">Servers: DevOps see all</field>
         <field name="model_id" ref="model_server_host"/>
@@ -54,9 +47,9 @@
     </record>
 
     <record id="rule_stage_developer" model="ir.rule">
-        <field name="name">Stages: Developers read all (incl. client servers)</field>
+        <field name="name">Stages: Developers read all except View-denied</field>
         <field name="model_id" ref="model_server_stage"/>
-        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="domain_force">[('id', 'not in', user.stage_denied_ids.ids)]</field>
         <field name="groups" eval="[(4, ref('group_user'))]"/>
     </record>
     <record id="rule_stage_devops_all" model="ir.rule">
@@ -64,15 +57,6 @@
         <field name="model_id" ref="model_server_stage"/>
         <field name="domain_force">[(1, '=', 1)]</field>
         <field name="groups" eval="[(4, ref('group_devops'))]"/>
-    </record>
-    <!-- Tech Leads see every stage (incl. Client Server / DevOps-only hosts), so
-         they can open and act on client-server instances. OR-combined with the
-         Developer rule above for users who hold both. -->
-    <record id="rule_stage_tech_lead_all" model="ir.rule">
-        <field name="name">Stages: Tech Leads see all</field>
-        <field name="model_id" ref="model_server_stage"/>
-        <field name="domain_force">[(1, '=', 1)]</field>
-        <field name="groups" eval="[(4, ref('group_tech_lead'))]"/>
     </record>
 
 </odoo>

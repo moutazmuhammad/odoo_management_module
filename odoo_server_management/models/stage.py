@@ -25,9 +25,10 @@ _logger = logging.getLogger(__name__)
 SECRET_KEY_ENV = 'ODOO_SERVER_MGMT_KEY'
 
 # Role groups used for in-method authorization (defense in depth behind sudo()).
-# Hierarchy (each implies the previous): Developer -> Tech Lead -> DevOps -> Administrator.
+# Hierarchy (each implies the previous): Developer -> DevOps -> Administrator.
+# Per-user, per-stage action grants live on server.stage.access (the 'Access'
+# page) and are enforced on top of the Developer role — see _check_action_access.
 GROUP_USER = 'odoo_server_management.group_user'          # Developer: act on stages
-GROUP_TECH_LEAD = 'odoo_server_management.group_tech_lead'  # Tech Lead: Developer + act on Client Server stages
 GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: servers/discover/agent + everything except settings
 GROUP_ADMIN = 'odoo_server_management.group_admin'        # Administrator: + General Settings
 
@@ -110,20 +111,58 @@ class Stage(models.Model):
     name = fields.Char(string='Stage Name', required=True)
     client_stage = fields.Boolean(string='Client Server', default=False)
     notes = fields.Text(string='Notes')
-    # Per-user flag for the UI: can the current user run operational actions on
-    # this instance? A normal instance may be acted on by any Developer+; a
-    # **Client Server** instance only by Tech Lead+ (Tech Lead / DevOps / Admin).
-    # Developers may still READ client stages, just not act on them.
-    can_act = fields.Boolean(compute='_compute_can_act', depends_context=('uid',))
+
+    # Per-user, per-stage action grants, managed on the DevOps/Admin 'Access'
+    # page. Each row is the authoritative permission set for one (user, stage).
+    access_ids = fields.One2many(
+        'server.stage.access', 'stage_id', string='Access', groups=GROUP_DEVOPS)
+
+    # Per-user UI gates for the action buttons (one per grantable action), so a
+    # button auto-hides when the current user lacks that action on this stage.
+    #   * normal (non-client) stage, no grant row -> allowed (default ON)
+    #   * client stage, no grant row              -> denied  (default OFF)
+    #   * a grant row -> exactly what its toggles say
+    # DevOps/Admin (and superuser) always get every action.
+    can_pull = fields.Boolean(compute='_compute_action_perms', depends_context=('uid',))
+    can_backup = fields.Boolean(compute='_compute_action_perms', depends_context=('uid',))
+    can_upgrade = fields.Boolean(compute='_compute_action_perms', depends_context=('uid',))
+    can_control = fields.Boolean(compute='_compute_action_perms', depends_context=('uid',))
+
+    # Grantable action key -> the boolean column on server.stage.access gating it.
+    _ACTION_PERM_FIELD = {
+        'pull': 'can_pull',
+        'backup': 'can_backup',
+        'upgrade': 'can_upgrade',
+        'control': 'can_control',
+    }
+
+    def _user_action_grants(self):
+        """Return {stage_id: grant_record} of the CURRENT user's grant rows for
+        the stages in `self`, read with sudo (Developers have no ACL on the grant
+        model). An empty dict entry means 'no row' -> caller applies the per-type
+        default. Not called for DevOps/Admin, who bypass grants entirely."""
+        grants = self.env['server.stage.access'].sudo().search([
+            ('stage_id', 'in', self.ids), ('user_id', '=', self.env.uid)])
+        return {g.stage_id.id: g for g in grants}
 
     @api.depends('client_stage')
-    def _compute_can_act(self):
-        # Tech Lead is implied by DevOps and Admin, so this one check covers all
-        # three roles allowed to act on Client Server stages.
-        is_operator = (self.env.su
-                       or self.env.user.has_group(GROUP_TECH_LEAD))
+    def _compute_action_perms(self):
+        privileged = self.env.su or self.env.user.has_group(GROUP_DEVOPS)
+        grants = {} if privileged else self._user_action_grants()
         for rec in self:
-            rec.can_act = (not rec.client_stage) or is_operator
+            if privileged:
+                rec.can_pull = rec.can_backup = rec.can_upgrade = rec.can_control = True
+                continue
+            grant = grants.get(rec.id)
+            if grant:
+                rec.can_pull = grant.can_pull
+                rec.can_backup = grant.can_backup
+                rec.can_upgrade = grant.can_upgrade
+                rec.can_control = grant.can_control
+            else:
+                # No row: normal stage -> allow all; client stage -> deny all.
+                default = not rec.client_stage
+                rec.can_pull = rec.can_backup = rec.can_upgrade = rec.can_control = default
 
     host_id = fields.Many2one(
         'server.host',
@@ -561,13 +600,30 @@ class Stage(models.Model):
         if not any(user.has_group(g) for g in groups):
             raise AccessError(_("You are not allowed to perform this operation."))
 
-    def _check_action_access(self):
-        """Gate an operational action (Start/Stop/Restart, Pull Code, Backup,
-        Upgrade): a **Client Server** instance may only be acted on by Tech
-        Leads/DevOps/Admins; a normal instance by any Developer+. (DevOps and
-        Admin imply Tech Lead, so the single check covers them.)"""
+    def _check_action_access(self, action):
+        """Gate an operational action on a stage. `action` is one of
+        'pull' / 'backup' / 'upgrade' / 'control'.
+
+        DevOps/Admin (and superuser) always pass. Otherwise the user must at
+        least be a Developer, and then the per-user grant row on the 'Access'
+        page decides: with a row, the matching toggle must be ON; with NO row,
+        the default is ALLOW on a normal stage and DENY on a Client Server."""
         self.ensure_one()
-        self._check_access(GROUP_TECH_LEAD if self.client_stage else GROUP_USER)
+        if self.env.su:
+            return
+        # Every operational action requires at least Developer.
+        self._check_access(GROUP_USER)
+        if self.env.user.has_group(GROUP_DEVOPS):
+            return
+        field = self._ACTION_PERM_FIELD[action]
+        grant = self.env['server.stage.access'].sudo().search([
+            ('stage_id', '=', self.id), ('user_id', '=', self.env.uid)], limit=1)
+        allowed = grant[field] if grant else (not self.client_stage)
+        if not allowed:
+            raise AccessError(_(
+                "You don't have permission to perform this action on this "
+                "instance. Ask a DevOps/Administrator to grant it on the Access "
+                "page."))
 
     # ===========================
     # Helpers
@@ -1133,7 +1189,7 @@ class Stage(models.Model):
     # Actions
     # ===========================
     def action_upgrade_module(self):
-        self._check_action_access()
+        self._check_action_access('upgrade')
         self = self.sudo()
         self.ensure_one()
         dbs = self._cached_databases()
@@ -1209,7 +1265,7 @@ class Stage(models.Model):
         }
 
     def action_pull_code(self):
-        self._check_action_access()
+        self._check_action_access('pull')
         self = self.sudo()
         self.ensure_one()
         return {
@@ -1242,28 +1298,28 @@ class Stage(models.Model):
         return work
 
     def action_restart_service(self):
-        self._check_action_access()
+        self._check_action_access('control')
         self.ensure_one()
         return self.sudo()._run_bg(_('Restart service'), self._service_action_work(
             'restart_service.yml', 'running', _('🔁 Service restarted successfully')),
             reload=True)
 
     def action_stop_service(self):
-        self._check_action_access()
+        self._check_action_access('control')
         self.ensure_one()
         return self.sudo()._run_bg(_('Stop service'), self._service_action_work(
             'stop_service.yml', 'stopped', _('🛑 Service stopped successfully')),
             reload=True)
 
     def action_start_service(self):
-        self._check_action_access()
+        self._check_action_access('control')
         self.ensure_one()
         return self.sudo()._run_bg(_('Start service'), self._service_action_work(
             'start_service.yml', 'running', _('🟢 Service started successfully')),
             reload=True)
 
     def action_backup_database(self):
-        self._check_action_access()
+        self._check_action_access('backup')
         self = self.sudo()
         dbs = self._cached_databases()
         ctx = dict(self.env.context, default_stage_id=self.id, db_list=dbs)
