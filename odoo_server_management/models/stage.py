@@ -25,10 +25,14 @@ _logger = logging.getLogger(__name__)
 SECRET_KEY_ENV = 'ODOO_SERVER_MGMT_KEY'
 
 # Role groups used for in-method authorization (defense in depth behind sudo()).
-# Hierarchy (each implies the previous): Developer -> DevOps -> Administrator.
+# Hierarchy (each implies the previous): Developer -> Tech Lead -> DevOps -> Administrator.
 # Per-user, per-stage action grants live on server.stage.access (the 'Access'
-# page) and are enforced on top of the Developer role — see _check_action_access.
+# page) and are enforced on top of the role — see _check_action_access. The role
+# only sets the DEFAULT when a user has no grant row on a stage: a Tech Lead gets
+# every action on Client Servers by default (a Developer gets none); an explicit
+# grant row overrides that default either way.
 GROUP_USER = 'odoo_server_management.group_user'          # Developer: act on stages
+GROUP_TECH_LEAD = 'odoo_server_management.group_tech_lead'  # Tech Lead: Developer + client servers allowed by default
 GROUP_DEVOPS = 'odoo_server_management.group_devops'      # DevOps: servers/discover/agent + everything except settings
 GROUP_ADMIN = 'odoo_server_management.group_admin'        # Administrator: + General Settings
 
@@ -148,6 +152,7 @@ class Stage(models.Model):
     @api.depends('client_stage')
     def _compute_action_perms(self):
         privileged = self.env.su or self.env.user.has_group(GROUP_DEVOPS)
+        is_tech_lead = (not privileged) and self.env.user.has_group(GROUP_TECH_LEAD)
         grants = {} if privileged else self._user_action_grants()
         for rec in self:
             if privileged:
@@ -160,8 +165,9 @@ class Stage(models.Model):
                 rec.can_upgrade = grant.can_upgrade
                 rec.can_control = grant.can_control
             else:
-                # No row: normal stage -> allow all; client stage -> deny all.
-                default = not rec.client_stage
+                # No row: normal stage -> allow all; client stage -> allow only
+                # for Tech Leads (Developers denied until granted).
+                default = (not rec.client_stage) or is_tech_lead
                 rec.can_pull = rec.can_backup = rec.can_upgrade = rec.can_control = default
 
     host_id = fields.Many2one(
@@ -619,7 +625,8 @@ class Stage(models.Model):
         DevOps/Admin (and superuser) always pass. Otherwise the user must at
         least be a Developer, and then the per-user grant row on the 'Access'
         page decides: with a row, the matching toggle must be ON; with NO row,
-        the default is ALLOW on a normal stage and DENY on a Client Server."""
+        the default is ALLOW on a normal stage, and on a Client Server ALLOW for
+        a Tech Lead but DENY for a plain Developer."""
         self.ensure_one()
         if self.env.su:
             return
@@ -630,7 +637,10 @@ class Stage(models.Model):
         field = self._ACTION_PERM_FIELD[action]
         grant = self.env['server.stage.access'].sudo().search([
             ('stage_id', '=', self.id), ('user_id', '=', self.env.uid)], limit=1)
-        allowed = grant[field] if grant else (not self.client_stage)
+        if grant:
+            allowed = grant[field]
+        else:
+            allowed = (not self.client_stage) or self.env.user.has_group(GROUP_TECH_LEAD)
         if not allowed:
             raise AccessError(_(
                 "You don't have permission to perform this action on this "

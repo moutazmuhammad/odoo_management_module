@@ -38,11 +38,25 @@ class ResUsers(models.Model):
         users._sync_access_grid()
         return users
 
+    _TECH_LEAD = 'odoo_server_management.group_tech_lead'
+
     def write(self, vals):
+        # Snapshot Tech Lead status so we can tell if this write flips it.
+        before = ({u.id: u.has_group(self._TECH_LEAD) for u in self}
+                  if 'groups_id' in vals else {})
         res = super().write(vals)
-        # Group membership can change who is a Developer -> refresh their rows.
         if 'groups_id' in vals:
+            # A user may have just become a Developer/Tech Lead -> ensure rows.
             self._sync_access_grid()
+            # If Tech Lead membership flipped, re-apply the client-stage default
+            # (promotion grants by-default client access; demotion revokes it).
+            flipped = self.filtered(
+                lambda u: u.has_group(self._TECH_LEAD) != before.get(u.id, False))
+            if flipped:
+                try:
+                    self.env['server.stage.access'].sudo()._reset_client_defaults(flipped)
+                except Exception:  # noqa: BLE001
+                    pass
         return res
 
     @api.model

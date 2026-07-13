@@ -15,16 +15,27 @@
         <field name="category_id" ref="group_category_project_roles"/>
     </record>
 
+    <!-- Tech Lead: a Developer who, BY DEFAULT, may run every action on Client
+         Server instances too (a plain Developer is read-only on client servers
+         until granted). Their default is still overridable per instance on the
+         Access page — switch actions OFF to take permissions away from a
+         specific Tech Lead. No servers, no settings, no Access-page management. -->
+    <record id="group_tech_lead" model="res.groups">
+        <field name="name">Tech Lead</field>
+        <field name="category_id" ref="group_category_project_roles"/>
+        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
+    </record>
+
     <!-- DevOps: everything EXCEPT the General Settings menu — manage Servers
          (create), run Discover Instances, Install Self-Backup Agent, manage the
          per-user Access page, all server buttons (Test Connection, Check Status,
          Terminal, Run Backup Now), all stage pages, repository management.
          DevOps bypasses the per-stage grants (every action on every stage).
-         DevOps is a superset of Developer. -->
+         DevOps is a superset of Tech Lead (which is a superset of Developer). -->
     <record id="group_devops" model="res.groups">
         <field name="name">DevOps</field>
         <field name="category_id" ref="group_category_project_roles"/>
-        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
+        <field name="implied_ids" eval="[(4, ref('group_tech_lead'))]"/>
     </record>
 
     <!-- Administrator: DevOps + the global General Settings. -->

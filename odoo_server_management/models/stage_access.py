@@ -64,14 +64,21 @@ class StageAccess(models.Model):
         return group_user.users - group_devops.users
 
     @api.model
+    def _client_default(self, user):
+        """Default actions on a CLIENT stage for a user with no grant row: a Tech
+        Lead is fully allowed, a plain Developer denied. (Normal stages always
+        default to allowed for everyone.)"""
+        return user.has_group('odoo_server_management.group_tech_lead')
+
+    @api.model
     def _create_missing(self, users, stages):
-        """Create a grant row for every (developer, stage) pair in
-        users × stages that doesn't already have one. `users` is filtered down
-        to actual Developers (DevOps/Admin are skipped — they bypass grants).
-        Rows are created with the current effective default (View always ON; the
-        four actions ON for a normal instance, OFF for a Client Server), so
-        materialising the grid changes no behaviour until a toggle is flipped.
-        Returns the number of rows created."""
+        """Create a grant row for every (user, stage) pair in users × stages that
+        doesn't already have one. `users` is filtered to the grid population
+        (Developers/Tech Leads; DevOps/Admin skipped — they bypass grants). Rows
+        are created with the current effective default (View always ON; the four
+        actions ON for a normal instance; on a Client Server ON for a Tech Lead,
+        OFF for a Developer), so materialising the grid changes no behaviour until
+        a toggle is flipped. Returns the number of rows created."""
         users = users & self._developer_users()
         stages = stages.sudo()
         if not users or not stages:
@@ -81,11 +88,13 @@ class StageAccess(models.Model):
             [('user_id', 'in', users.ids), ('stage_id', 'in', stages.ids)],
             ['user_id', 'stage_id'])
         have = {(r['user_id'][0], r['stage_id'][0]) for r in existing}
+        client_default = {u.id: self._client_default(u) for u in users}
         vals = []
         for st in stages:
-            allow = not st.client_stage
+            is_client = st.client_stage
             for u in users:
                 if (u.id, st.id) not in have:
+                    allow = client_default[u.id] if is_client else True
                     vals.append({
                         'stage_id': st.id, 'user_id': u.id, 'can_read': True,
                         'can_pull': allow, 'can_backup': allow,
@@ -94,6 +103,24 @@ class StageAccess(models.Model):
         if vals:
             Access.create(vals)
         return len(vals)
+
+    @api.model
+    def _reset_client_defaults(self, users):
+        """Re-apply the role default to these users' CLIENT-stage rows — called
+        when a user's Tech Lead membership changes, so a promotion grants (and a
+        demotion revokes) the by-default client-server access. Normal-stage rows
+        are left untouched (they are allow-all for every role). View stays ON."""
+        users = users & self._developer_users()
+        if not users:
+            return
+        rows = self.sudo().search([
+            ('user_id', 'in', users.ids), ('client_stage', '=', True)])
+        default_by_user = {u.id: self._client_default(u) for u in users}
+        for user_id, allow in default_by_user.items():
+            urows = rows.filtered(lambda r: r.user_id.id == user_id)
+            if urows:
+                urows.write({'can_pull': allow, 'can_backup': allow,
+                             'can_upgrade': allow, 'can_control': allow})
 
     @api.model
     def _sync_matrix(self):
