@@ -91,7 +91,7 @@
         <field name="res_model">server.stage.access</field>
         <field name="view_mode">tree,form</field>
         <field name="search_view_id" ref="view_stage_access_search"/>
-        <field name="context">{'search_default_group_stage': 1}</field>
+        <field name="context">{'search_default_group_stage': 1, 'search_default_client': 1}</field>
         <field name="help" type="html">
             <p class="o_view_nocontent_smiling_face">Grant per-user access to an instance</p>
             <p>Add a row to give a specific user actions on a specific instance. A

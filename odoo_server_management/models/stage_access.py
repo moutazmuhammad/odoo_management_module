@@ -121,7 +121,8 @@ class StageAccess(models.Model):
         created = self._sync_matrix()
         action = self.env['ir.actions.act_window']._for_xml_id(
             'odoo_server_management.action_stage_access')
-        action['context'] = {'search_default_group_stage': 1}
+        action['context'] = {'search_default_group_stage': 1,
+                             'search_default_client': 1}
         msg = (_("Added %s new row(s).") % created) if created else _("Grid is already up to date.")
         action['name'] = 'Access'
         self.env['bus.bus']._sendone(
