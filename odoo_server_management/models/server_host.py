@@ -1320,7 +1320,11 @@ class ServerHost(models.Model):
     def _alert_backup_digest(self):
         """Send ONE Teams alert listing, PER INSTANCE, what needs attention: instances
         with no daily backup, and instances flagged for review by discovery. No-op
-        when nothing is wrong or no webhook is configured (a healthy day stays silent)."""
+        when nothing is wrong or no webhook is configured (a healthy day stays silent).
+
+        Client Server instances are called out FIRST, under their own urgent
+        heading, because a missed client-server backup is the highest-priority
+        thing to review."""
         Storage = self.env['server.backup.storage']
         if not Storage._teams_webhook():
             return
@@ -1329,12 +1333,29 @@ class ServerHost(models.Model):
         review = Stage.search([('needs_review', '=', True)])
         if not missing and not review:
             return
+        now = fields.Datetime.now()
+
+        def _age(s):
+            if not s.last_backup:
+                return _("never backed up")
+            hrs = int((now - s.last_backup).total_seconds() // 3600)
+            return _("last backup %dh ago") % hrs
+
+        def _line(s):
+            return "• **%s** — server %s (%s) — %s" % (
+                s.name, s.host_id.name, s.host_id.ip or '?', _age(s))
+
+        client_missing = missing.filtered('client_stage')
+        other_missing = missing - client_missing
         lines = []
-        if missing:
-            lines.append("**🔴 Instances with NO daily backup (%d)**" % len(missing))
-            for s in missing:
-                lines.append("• **%s** — server %s (%s)" % (
-                    s.name, s.host_id.name, s.host_id.ip or '?'))
+        if client_missing:
+            lines.append("**🚨 CLIENT SERVERS with NO daily backup (%d) — review now**"
+                         % len(client_missing))
+            lines += [_line(s) for s in client_missing]
+        if other_missing:
+            lines.append("**🔴 Other instances with NO daily backup (%d)**"
+                         % len(other_missing))
+            lines += [_line(s) for s in other_missing]
         if review:
             lines.append("**🟠 Instances needing review (%d)**" % len(review))
             for s in review:
@@ -1342,7 +1363,8 @@ class ServerHost(models.Model):
                             if ln.strip()), _("flagged for review"))
                 lines.append("• **%s** on %s — %s" % (s.name, s.host_id.name, why.strip()))
         color = "D40000" if missing else "E8A400"
-        title = "%s — %s" % (_("Daily backup alert"), fields.Date.today())
+        hdr = _("⚠️ CLIENT backup alert") if client_missing else _("Daily backup alert")
+        title = "%s — %s" % (hdr, fields.Date.today())
         Storage._post_teams(title, "\n\n".join(lines), color)
 
     def action_discover(self):
