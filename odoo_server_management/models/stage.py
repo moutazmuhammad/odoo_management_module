@@ -281,6 +281,18 @@ class Stage(models.Model):
         for rec in self:
             rec.admin_password_enc = Stage._encrypt_secret(rec.admin_password)
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        """Auto-enrol every new instance into the Access grid: as soon as a
+        stage is created (manually or by discovery) a grant row is added for
+        each Developer, so the 'Access' page never misses a new instance."""
+        stages = super().create(vals_list)
+        try:
+            self.env['server.stage.access'].sudo()._sync_stages(stages)
+        except Exception:  # noqa: BLE001 — never let grid-sync break stage creation
+            _logger.exception("Access grid sync failed for new stage(s)")
+        return stages
+
     def write(self, vals):
         """Track hand-edits so discovery never clobbers them.
 

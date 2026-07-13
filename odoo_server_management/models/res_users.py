@@ -24,6 +24,27 @@ class ResUsers(models.Model):
             rows = Access.search([('user_id', '=', user.id), ('can_read', '=', False)])
             user.stage_denied_ids = rows.mapped('stage_id')
 
+    def _sync_access_grid(self):
+        """Enrol these users into the Access grid across all stages (a no-op for
+        non-Developers). Wrapped so a grid hiccup never breaks user save/login."""
+        try:
+            self.env['server.stage.access'].sudo()._sync_users(self)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        users = super().create(vals_list)
+        users._sync_access_grid()
+        return users
+
+    def write(self, vals):
+        res = super().write(vals)
+        # Group membership can change who is a Developer -> refresh their rows.
+        if 'groups_id' in vals:
+            self._sync_access_grid()
+        return res
+
     @api.model
     def _signup_allowed_domains(self):
         """Parsed list of allowed signup email domains (empty = no restriction)."""

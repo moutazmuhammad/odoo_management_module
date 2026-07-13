@@ -64,18 +64,19 @@ class StageAccess(models.Model):
         return group_user.users - group_devops.users
 
     @api.model
-    def _sync_matrix(self):
-        """Ensure a grant row exists for every (developer, stage) pair, so the
-        Access page shows the FULL grid — every user against every stage — with
-        no manual record creation. Missing rows are created with the current
-        effective default (View always ON; the four actions ON for a normal
-        instance, OFF for a Client Server), so materialising the grid changes no
-        behaviour until an admin flips a toggle. Returns the number created."""
-        Access = self.sudo()
-        users = self._developer_users()
-        stages = self.env['server.stage'].sudo().search([])
+    def _create_missing(self, users, stages):
+        """Create a grant row for every (developer, stage) pair in
+        users × stages that doesn't already have one. `users` is filtered down
+        to actual Developers (DevOps/Admin are skipped — they bypass grants).
+        Rows are created with the current effective default (View always ON; the
+        four actions ON for a normal instance, OFF for a Client Server), so
+        materialising the grid changes no behaviour until a toggle is flipped.
+        Returns the number of rows created."""
+        users = users & self._developer_users()
+        stages = stages.sudo()
         if not users or not stages:
             return 0
+        Access = self.sudo()
         existing = Access.search_read(
             [('user_id', 'in', users.ids), ('stage_id', 'in', stages.ids)],
             ['user_id', 'stage_id'])
@@ -93,6 +94,26 @@ class StageAccess(models.Model):
         if vals:
             Access.create(vals)
         return len(vals)
+
+    @api.model
+    def _sync_matrix(self):
+        """Full grid: every developer × every stage. Used by the menu and the
+        Refresh button. Cheap when already materialised (creates nothing)."""
+        return self._create_missing(
+            self._developer_users(), self.env['server.stage'].sudo().search([]))
+
+    @api.model
+    def _sync_stages(self, stages):
+        """Rows for NEW stages (all developers). Called on server.stage create
+        (incl. discovery), so a freshly-discovered instance joins the grid at
+        once."""
+        return self._create_missing(self._developer_users(), stages)
+
+    @api.model
+    def _sync_users(self, users):
+        """Rows for NEW/changed users (all stages). Called on res.users
+        create/write, so a user who just became a Developer joins the grid."""
+        return self._create_missing(users, self.env['server.stage'].sudo().search([]))
 
     def action_sync_matrix(self):
         """Header button on the Access list: (re)build the grid, then reopen it
