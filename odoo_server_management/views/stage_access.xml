@@ -76,6 +76,8 @@
                 <group expand="0" string="Group By">
                     <filter name="group_stage" string="Stage"
                             context="{'group_by': 'stage_id'}"/>
+                    <filter name="group_client" string="Client Server"
+                            context="{'group_by': 'client_stage'}"/>
                     <filter name="group_user" string="User"
                             context="{'group_by': 'user_id'}"/>
                 </group>
