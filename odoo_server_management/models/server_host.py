@@ -183,16 +183,36 @@ class ServerHost(models.Model):
 
     @api.model
     def _backup_max_age_hours(self):
-        """Daily-backup freshness window (hours). A server with no successful backup
-        newer than this is 'overdue' — the daily monitor also uses it to decide when
-        to run a fallback backup. Floored at 24h so a normal same-day run is never
-        flagged. Default ~a day (28h) so a missed nightly run is caught next morning."""
+        """Daily-backup freshness window (hours) that drives the RED 'overdue' flag.
+        A server with no successful backup newer than this is 'overdue'. Floored at
+        24h so a normal same-day run is never flagged. Default ~a day (28h) so a
+        missed nightly run is caught next morning."""
         ICP = self.env['ir.config_parameter'].sudo()
         try:
             hours = int(ICP.get_param('server.backup.max_age_hours', default='28'))
         except (TypeError, ValueError):
             hours = 28
         return max(24, hours)
+
+    @api.model
+    def _backup_daily_age_hours(self):
+        """Freshness window the daily MONITOR uses to decide whether to take a
+        fallback backup — deliberately TIGHTER than the overdue window above.
+
+        The monitor runs once every 24h. If it used the 28h overdue window to
+        decide, a backup that is 24-28h old would be judged 'still fresh, skip' —
+        yet it crosses the 28h overdue line only a few hours later, before the next
+        monitor pass, so the server goes RED for hours every day and that day's
+        backup is silently skipped. Using a window shorter than BOTH the overdue
+        window and the 24h monitor cadence means every pass either confirms a
+        genuinely recent (<20h) backup or takes a fresh one — so a server can never
+        age into 'overdue' between passes. Kept at least 4h below max_age."""
+        ICP = self.env['ir.config_parameter'].sudo()
+        try:
+            hours = int(ICP.get_param('server.backup.daily_age_hours', default='20'))
+        except (TypeError, ValueError):
+            hours = 20
+        return max(1, min(hours, self._backup_max_age_hours() - 4))
 
     @api.depends('stage_ids.backup_overdue')
     def _compute_backup_overdue(self):
@@ -1181,9 +1201,16 @@ class ServerHost(models.Model):
         Storage = self.env['server.backup.storage']
         if not Storage._keys_set():
             return
-        # Daily window (floored at 24h): an INSTANCE with no backup newer than this
-        # has missed its daily backup, so we take a fallback of exactly that
-        # instance's database(s) and — if it still has none — flag the instance.
+        # Two windows on purpose:
+        #   • daily_age (~20h) — the freshness the monitor requires to SKIP taking a
+        #     fallback. Tighter than the overdue window AND the 24h monitor cadence,
+        #     so a backup that is 'nearly overdue' (24-28h old) is refreshed NOW
+        #     rather than left to cross the red line before the next pass.
+        #   • max_age (28h)   — the RED overdue window (only used for messaging here).
+        # An INSTANCE with no backup newer than daily_age has missed its daily
+        # backup, so we take a fallback of exactly that instance's database(s) and —
+        # if it still has none — flag the instance.
+        daily_age = self._backup_daily_age_hours()
         max_age = self._backup_max_age_hours()
         now = fields.Datetime.now()
         Stage = self.env['server.stage'].sudo()
@@ -1201,7 +1228,7 @@ class ServerHost(models.Model):
                 # 1. Which INSTANCES have no recent backup for their database(s)? (One
                 #    bucket listing per host covers every instance; a database shared
                 #    by two instances counts as backed up for both.)
-                fresh = host._recent_backup_dbs(max_age)
+                fresh = host._recent_backup_dbs(daily_age)
                 stale = stages.filtered(lambda s: not s._backup_dbs() <= fresh)
                 if stale:
                     # Self-heal PER INSTANCE: back up exactly the stale instances'
@@ -1227,20 +1254,23 @@ class ServerHost(models.Model):
                     self.env.clear()
                     host = self.browse(host.id)
                     stages = host.stage_ids.filtered(lambda s: s._expects_backup())
-                    fresh = host._recent_backup_dbs(max_age)
+                    fresh = host._recent_backup_dbs(daily_age)
                 # 2. Per-instance: stamp last_backup / set-or-clear the instance flag.
                 host_reason, still_missing = None, self.env['server.stage']
                 for s in stages:
                     if s._backup_dbs() <= fresh:
-                        vals = {}
-                        if not s.last_backup or s.last_backup < (
-                                now - timedelta(hours=max_age)):
-                            vals['last_backup'] = now
+                        # A within-window backup was positively confirmed in the
+                        # bucket at `now`, so record `now`. Stamping unconditionally
+                        # (not only when the old value is already stale) is what keeps
+                        # a server from ageing into 'overdue' between daily passes —
+                        # the old value could be 24-28h old, not yet stale but about
+                        # to be, and refusing to refresh it is exactly what turned
+                        # servers red for hours each day.
+                        vals = {'last_backup': now}
                         if s.backup_review_needed:
                             vals.update({'backup_review_needed': False,
                                          'backup_review_reason': False})
-                        if vals:
-                            s.sudo().write(vals)
+                        s.sudo().write(vals)
                     else:
                         still_missing |= s
                         if host_reason is None:      # probe the host once for the reason
@@ -1260,10 +1290,11 @@ class ServerHost(models.Model):
                     _logger.warning("Backup monitor: host %s has %d instance(s) with "
                                     "NO recent backup", host.name, len(still_missing))
                 else:
+                    # Every instance has a confirmed fresh backup — record the
+                    # verification time so the server rollup can't age into overdue
+                    # before the next daily pass (see the per-instance note above).
                     hvals['backup_review_reason'] = False
-                    if not host.last_backup or host.last_backup < (
-                            now - timedelta(hours=max_age)):
-                        hvals['last_backup'] = now
+                    hvals['last_backup'] = now
                 host.write(hvals)
                 self.env.cr.commit()
             except Exception:
