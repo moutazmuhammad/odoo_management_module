@@ -207,7 +207,8 @@
                                 on the server). Use <b>Backup Now</b> only when you need an
                                 up-to-the-minute copy; it dumps the live database on the server.
                                 Download gives a temporary link. For <b>Client Server</b> stages,
-                                only Operators and Admins may download or back up.
+                                only Tech Leads, Operators and Admins — or a Developer granted
+                                access on the <b>Access</b> page — may download or back up.
                             </div>
                         </page>
                     </notebook>

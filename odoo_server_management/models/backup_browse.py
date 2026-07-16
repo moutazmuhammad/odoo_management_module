@@ -4,7 +4,7 @@ import logging
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError, AccessError
 
-from .stage import GROUP_USER, GROUP_DEVOPS
+from .stage import GROUP_USER, GROUP_TECH_LEAD
 
 _logger = logging.getLogger(__name__)
 
@@ -239,9 +239,20 @@ class BackupFile(models.TransientModel):
 
     def action_download(self):
         self.ensure_one()
-        # Client-server backups: Operators/Admins only. Re-check from the key.
+        # Client-server backups are sensitive, so gate them EXACTLY like taking a
+        # backup does (_check_action_access('backup')) instead of hard-requiring
+        # DevOps — otherwise a Tech Lead (who has client-server access by default)
+        # or a Developer explicitly granted 'backup' on the stage could see the
+        # download button yet be denied with "You are not allowed to perform this
+        # operation." Re-derive the client flag from the key (never trust a stored
+        # flag). When the row is tied to a stage (the stage form's Backups list) we
+        # honour that stage's per-user grant; for a global listing row with no
+        # stage, fall back to Tech Lead and above.
         if self._is_client_key(self.key):
-            self.env['server.stage']._check_access(GROUP_DEVOPS)
+            if self.stage_id:
+                self.stage_id._check_action_access('backup')
+            else:
+                self.env['server.stage']._check_access(GROUP_TECH_LEAD)
         else:
             self.env['server.stage']._check_access(GROUP_USER)
         url = self.env['server.backup.storage']._presign_get(
