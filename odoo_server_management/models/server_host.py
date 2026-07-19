@@ -571,7 +571,7 @@ class ServerHost(models.Model):
     # keeping the newest) instead of keeping a fixed COUNT of files — the count-based
     # cleanup ignored the days setting. Retention now travels in the dblist response
     # so a setting change applies on the next run without a redeploy.
-    _AGENT_VERSION = '12'
+    _AGENT_VERSION = '13'
 
     @staticmethod
     def _backup_norm(value):

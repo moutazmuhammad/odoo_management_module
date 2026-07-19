@@ -505,7 +505,20 @@ def parse_nginx():
 
 
 def _data_dir_candidates():
-    dirs, confs = set(), set()
+    """Ordered, de-duplicated data-dir candidates, most authoritative first.
+
+    Returns a LIST, not a set. Order matters and must be stable: a set's
+    iteration order depends on per-process string hash randomization, so a set
+    made find_filestore() pick a different directory on each nightly run when a
+    host had more than one 'filestore/<db>' (e.g. the real data_dir plus a stale
+    ~/.local/share/Odoo left over from an older install). That silently produced
+    a filestore-less backup on random nights — same db, wildly different size.
+
+    Tier 1 = explicitly configured (odoo's -D/--data-dir, then data_dir= in a
+    conf we can actually see). Tier 2 = conventional fallback locations, which
+    are guesses and must never outrank an explicit setting.
+    """
+    explicit, confs = [], []
     try:
         ps = _run(['ps', '-eo', 'args']).stdout
     except Exception:
@@ -514,25 +527,49 @@ def _data_dir_candidates():
         if 'odoo' not in line.lower() and 'openerp' not in line.lower():
             continue
         for mm in re.finditer(r'(?:-c|--config)[ =]\s*(\S+)', line):
-            confs.add(mm.group(1))
+            confs.append(mm.group(1))
         for mm in re.finditer(r'(?:-D|--data-dir)[ =]\s*(\S+)', line):
-            dirs.add(mm.group(1))
-    confs.update(_conf_files())
+            explicit.append(mm.group(1))
+    confs.extend(sorted(_conf_files()))
     for conf in confs:
         cfg = _parse_conf(conf) or {}
         if cfg.get('data_dir'):
-            dirs.add(cfg['data_dir'])
-    for home in ('/opt/odoo', '/home/odoo', '/var/lib/odoo', os.path.expanduser('~')):
-        dirs.add(os.path.join(home, '.local/share/Odoo'))
-    dirs.add('/var/lib/odoo')
-    return {d for d in dirs if d}
+            explicit.append(cfg['data_dir'])
+
+    fallback = [os.path.join(h, '.local/share/Odoo') for h in
+                ('/opt/odoo', '/home/odoo', '/var/lib/odoo', os.path.expanduser('~'))]
+    fallback.append('/var/lib/odoo')
+
+    out, seen = [], set()
+    for d in explicit + fallback:
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
 
 
 def find_filestore(db):
-    for d in _data_dir_candidates():
-        p = os.path.join(d, 'filestore', db)
-        if os.path.isdir(p):
-            return p
+    """Locate this db's filestore, deterministically.
+
+    Candidates are checked in priority order, but when MORE THAN ONE matches we
+    take the largest rather than the highest-priority one: a leftover filestore
+    from an old install is typically a near-empty shell, and picking it would
+    quietly drop gigabytes of attachments from the backup. Size is the only
+    signal that reliably distinguishes the live filestore from an abandoned one.
+    """
+    matches = [p for p in (os.path.join(d, 'filestore', db)
+                           for d in _data_dir_candidates()) if os.path.isdir(p)]
+    if matches:
+        if len(matches) > 1:
+            # Highest-priority match wins ties, so keep the original order stable.
+            sized = [(_dir_bytes(p), -i, p) for i, p in enumerate(matches)]
+            best_bytes, _, best = max(sized)
+            # stderr, not stdout: stdout carries the base64 marker protocol.
+            sys.stderr.write(
+                'smart_backup: %s has %d filestore candidates %r, picked %s (%d bytes)\n'
+                % (db, len(matches), matches, best, best_bytes))
+            return best
+        return matches[0]
     try:
         r = _run(
             ['find', '/opt', '/home', '/var/lib', '-maxdepth', '7', '-type', 'd',
