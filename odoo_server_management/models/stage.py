@@ -1340,21 +1340,31 @@ class Stage(models.Model):
             'start_service.yml', 'running', _('🟢 Service started successfully')),
             reload=True)
 
-    def action_backup_database(self):
+    def _open_backup_wizard(self, backup_format):
+        """Open the manual-backup dialog pre-set to `backup_format`
+        ('full' = database + filestore zip, 'sql' = plain pg_dump)."""
         self._check_action_access('backup')
         self = self.sudo()
         dbs = self._cached_databases()
-        ctx = dict(self.env.context, default_stage_id=self.id, db_list=dbs)
+        ctx = dict(self.env.context, default_stage_id=self.id, db_list=dbs,
+                   default_backup_format=backup_format)
         if dbs:
             ctx['default_db_name'] = dbs[0]
         return {
-            'name': 'Backup Database',
+            'name': (_('Backup Database (SQL only)') if backup_format == 'sql'
+                     else _('Backup Database')),
             'type': 'ir.actions.act_window',
             'res_model': 'server.backup.database.wizard',
             'view_mode': 'form',
             'target': 'new',
             'context': ctx,
         }
+
+    def action_backup_database(self):
+        return self._open_backup_wizard('full')
+
+    def action_backup_database_sql(self):
+        return self._open_backup_wizard('sql')
 
     def action_delete_instance(self):
         """Open the confirmation dialog to permanently remove this (broken/old/unused)

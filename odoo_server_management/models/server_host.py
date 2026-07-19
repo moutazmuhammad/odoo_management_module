@@ -729,7 +729,7 @@ class ServerHost(models.Model):
             [category, server_seg, seg, db, '%s_%s.zip' % (db, day)])
         return self._backup_db_to_key(Storage, it, key)
 
-    def _backup_db_to_key(self, Storage, it, key):
+    def _backup_db_to_key(self, Storage, it, key, sql=False):
         """Dump + zip + upload ONE already-sized database (`it` = {db, filestore,
         size}) to the given object `key`, in its own ansible run (own timeout),
         single or multipart, completing/aborting the multipart upload. Returns True
@@ -737,16 +737,25 @@ class ServerHost(models.Model):
         'Backup Now' (manual/ keys) so both take the SAME Odoo-format zip via a
         direct pg_dump — never Odoo's /web/database/backup endpoint, which silently
         returns an HTML error page (saved as a corrupt zip) when its server-side
-        pg_dump fails."""
+        pg_dump fails.
+
+        sql=True uploads a plain pg_dump (.sql) instead: database only, no zip
+        container and no filestore. Sized from db_bytes rather than the combined
+        size, since the filestore is not part of that upload."""
         self.ensure_one()
         db = it.get('db')
         if not db:
             return False
-        size = int(it.get('size') or 0)
-        fs = it.get('filestore') or ''
+        if sql:
+            # Fall back to the combined size on an older agent that predates
+            # db_bytes — over-sizing only over-allocates pre-signed parts.
+            size = int(it.get('db_bytes') or it.get('size') or 0)
+        else:
+            size = int(it.get('size') or 0)
+        fs = '' if sql else (it.get('filestore') or '')
         mp = None
         if size < self._BACKUP_SINGLE_LIMIT:
-            target = {'mode': 'single', 'filestore': fs,
+            target = {'mode': 'single', 'filestore': fs, 'sql': sql,
                       'url': Storage._presign_put(key, ttl=12 * 3600)}
         else:
             upload_id = Storage._create_multipart(key)
@@ -754,6 +763,7 @@ class ServerHost(models.Model):
             part_urls = [Storage._presign_part(key, upload_id, i + 1)
                          for i in range(nparts)]
             target = {'mode': 'multipart', 'filestore': fs, 'upload_id': upload_id,
+                      'sql': sql,
                       'part_size': self._BACKUP_PART_SIZE, 'part_urls': part_urls}
             mp = {'key': key, 'upload_id': upload_id}
 
@@ -777,14 +787,21 @@ class ServerHost(models.Model):
                         (res or {}).get('error') if isinstance(res, dict) else res)
         return False
 
-    def _run_manual_backup(self, stage, db):
+    def _run_manual_backup(self, stage, db, sql=False):
         """On-demand 'Backup Now' for ONE database. Sizes + dumps + zips + uploads it
         to the manual/ area using the SAME robust pg_dump→zip→presigned-upload path
         as the daily backup (NOT Odoo's /web/database/backup, which streams a
         server-built zip that silently degrades to an HTML error page — saved as a
         corrupt zip — whenever its own pg_dump/-tmp step fails). Returns a result
         dict {ok, message, url?, detail?} for _run_bg (auto-downloads when 'url' is
-        set). The manual/ area is wiped daily by _cron_purge_manual."""
+        set). The manual/ area is wiped daily by _cron_purge_manual.
+
+        sql=True produces a plain .sql (database only, no filestore) instead of the
+        full Odoo zip. It lands in the SAME manual/ area — deliberately NOT beside
+        the nightly dated backups, because the retention pruner (both the agent's
+        cleanup_old_backups and Storage._prune) only ever matches '.zip', so a .sql
+        dropped in a nightly folder would never be pruned and would grow without
+        bound. manual/ is purged daily, so it has no such problem."""
         self.ensure_one()
         Storage = self.env['server.backup.storage']
         if not Storage._keys_set():
@@ -810,20 +827,25 @@ class ServerHost(models.Model):
             return {'ok': False, 'message': _(
                 "❌ Database %s is not reachable on this server (check that it "
                 "exists and the instance's Odoo conf is correct).") % db}
-        # manual/<category>/<seg>/<db>.zip — same layout backup_browse expects, and
-        # a FIXED key so each press overwrites the previous manual backup of this db.
+        # manual/<category>/<seg>/<db>.(zip|sql) — same layout backup_browse expects,
+        # and a FIXED key so each press overwrites the previous manual backup of this
+        # db. The two formats use different extensions, so taking one never clobbers
+        # the other.
+        ext = 'sql' if sql else 'zip'
         category = self.backup_category or 'odex'
         seg = self._backup_host_seg(stage.name) or self._backup_host_seg(self.ip)
-        key = Storage._object_key(['manual', category, seg, '%s.zip' % db])
-        if not self._backup_db_to_key(Storage, it, key):
+        fname = '%s.%s' % (db, ext)
+        key = Storage._object_key(['manual', category, seg, fname])
+        if not self._backup_db_to_key(Storage, it, key, sql=sql):
             return {'ok': False, 'message': _(
                 '❌ Backup of %s failed — see Last Operation Details.') % db}
         try:
-            url = Storage._presign_get(key, filename='%s.zip' % db)
+            url = Storage._presign_get(key, filename=fname)
         except Exception:  # noqa: BLE001 — backup is safe in the bucket; just no link
             url = ''
+        label = _('Database-only backup') if sql else _('Backup')
         return {'ok': True, 'url': url,
-                'message': _('✅ Backup of %s ready — downloading…') % db}
+                'message': _('✅ %s of %s ready — downloading…') % (label, db)}
 
     def action_run_backup_now(self):
         """Manually run the full backup for this server in the BACKGROUND (bypasses

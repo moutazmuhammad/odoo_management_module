@@ -612,9 +612,11 @@ def _append_db(out, seen, conn, db, nginx=None, http_port=''):
     domain = info.get('domain') or ''
     port = '' if domain else (info.get('listen')
                               or (str(http_port).strip() if http_port else ''))
+    dbb = _db_bytes(conn, db)
     out.append({'db': db, 'domain': domain, 'port': port,
                 'nginx_file': info.get('file') or '',
-                'filestore': fs, 'size': _db_bytes(conn, db) + _dir_bytes(fs)})
+                'filestore': fs, 'db_bytes': dbb,
+                'size': dbb + _dir_bytes(fs)})
 
 
 def detect_items(force_dbs=()):
@@ -664,8 +666,12 @@ def _size_targets(targets):
         if not _db_connectable(conn, db):
             continue
         fs = find_filestore(db)
+        # db_bytes is reported separately from the combined size so a SQL-only
+        # backup (no filestore) can be sized without the filestore's bytes.
+        dbb = _db_bytes(conn, db)
         out.append({'db': db, 'domain': t.get('domain') or '', 'port': t.get('port') or '',
-                    'filestore': fs, 'size': _db_bytes(conn, db) + _dir_bytes(fs)})
+                    'filestore': fs, 'db_bytes': dbb,
+                    'size': dbb + _dir_bytes(fs)})
     return out
 
 
@@ -744,18 +750,51 @@ def build_manifest(conn, db):
     }
 
 
-def _write_zip_contents(z, conn, db, filestore):
-    """Write the Odoo-identical entries (dump.sql + manifest.json + filestore/)
-    into an open ZipFile `z`. pg_dump is streamed straight into the entry, so the
-    database is never staged uncompressed on disk."""
+def _start_dump(conn, db):
+    """Start pg_dump for `db`; return (proc, fail) where fail() builds the
+    RuntimeError carrying pg_dump's stderr. Shared by the zip path and the
+    SQL-only path so both dump the database exactly the same way."""
     cmd, env = conn.dump_cmd(db, conn.server_major(db), ['--no-owner'])
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env)
 
-    def _dump_failed():
+    def fail():
         err = proc.stderr.read()
         return RuntimeError('pg_dump failed: %s'
                             % (err or b'').decode('utf-8', 'replace').strip()[:300])
+    return proc, fail
+
+
+def _pump(proc, write):
+    """Copy pg_dump's stdout into `write` in CHUNK-sized blocks."""
+    while True:
+        chunk = proc.stdout.read(CHUNK)
+        if not chunk:
+            break
+        write(chunk)
+
+
+def write_sql(conn, db, fh):
+    """Stream a plain pg_dump of `db` into the open binary file object `fh` —
+    the database ONLY, no manifest and no filestore. Same dump command as the
+    full backup, just without the zip container around it."""
+    proc, fail = _start_dump(conn, db)
+    _pump(proc, fh.write)
+    if proc.wait() != 0:
+        raise fail()
+
+
+def build_sql(conn, db, out_path):
+    """Write a plain .sql dump of `db` to `out_path` (used for single-PUT)."""
+    with open(out_path, 'wb') as fh:
+        write_sql(conn, db, fh)
+
+
+def _write_zip_contents(z, conn, db, filestore):
+    """Write the Odoo-identical entries (dump.sql + manifest.json + filestore/)
+    into an open ZipFile `z`. pg_dump is streamed straight into the entry, so the
+    database is never staged uncompressed on disk."""
+    proc, _dump_failed = _start_dump(conn, db)
 
     if sys.version_info >= (3, 6):
         # PREFERRED (Python 3.6+): stream pg_dump straight into the zip entry, so
@@ -764,11 +803,7 @@ def _write_zip_contents(z, conn, db, filestore):
         # (multipart), so ZIP64 must be reserved up front — otherwise a >4 GB
         # dump.sql raises "File size exceeded ZIP64 limit".
         with z.open('dump.sql', 'w', force_zip64=True) as zf:
-            while True:
-                chunk = proc.stdout.read(CHUNK)
-                if not chunk:
-                    break
-                zf.write(chunk)
+            _pump(proc, zf.write)
         if proc.wait() != 0:
             raise _dump_failed()
     else:
@@ -788,11 +823,7 @@ def _write_zip_contents(z, conn, db, filestore):
         tmp = tempfile.NamedTemporaryFile(prefix='dump-', suffix='.sql',
                                           dir=tmpdir, delete=False)
         try:
-            while True:
-                chunk = proc.stdout.read(CHUNK)
-                if not chunk:
-                    break
-                tmp.write(chunk)
+            _pump(proc, tmp.write)
             tmp.close()
             if proc.wait() != 0:
                 raise _dump_failed()
@@ -993,8 +1024,35 @@ def run_targets(targets):
             target = {'mode': 'single', 'url': target}
         try:
             conn = _resolve_conn(db)
-            fs = target.get('filestore') or find_filestore(db)
-            if target.get('mode') == 'multipart' and target.get('part_urls'):
+            # sql=True -> plain pg_dump, no zip container and no filestore. The
+            # upload plumbing (single PUT vs streamed multipart) is identical;
+            # only what gets written into it differs.
+            sql_only = bool(target.get('sql'))
+            fs = '' if sql_only else (target.get('filestore') or find_filestore(db))
+            if sql_only:
+                ext = '.sql'
+                if target.get('mode') == 'multipart' and target.get('part_urls'):
+                    writer = _StreamingMultipart(target['part_urls'],
+                                                 target['part_size'], base)
+                    try:
+                        write_sql(conn, db, writer)
+                        writer.close()
+                    except BaseException:
+                        writer.abort()
+                        raise
+                    results[db] = {'ok': True, 'mode': 'multipart',
+                                   'bytes': writer.total,
+                                   'upload_id': target.get('upload_id'),
+                                   'parts': writer.parts}
+                else:
+                    with tempfile.TemporaryDirectory(dir=base) as td:
+                        sp = os.path.join(td, db + ext)
+                        build_sql(conn, db, sp)
+                        res = _upload_zip(sp, target)
+                        res['upload_id'] = (res.get('upload_id')
+                                            or target.get('upload_id'))
+                        results[db] = res
+            elif target.get('mode') == 'multipart' and target.get('part_urls'):
                 # Stream the zip straight to multipart — peak disk is ONE part,
                 # so any size (50 GB … 500 GB) works regardless of free space.
                 writer = _StreamingMultipart(target['part_urls'],

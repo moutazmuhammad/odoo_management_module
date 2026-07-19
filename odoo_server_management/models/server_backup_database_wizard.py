@@ -10,6 +10,13 @@ class ServerBackupDatabaseWizard(models.TransientModel):
     _description = 'Backup Odoo Database Wizard'
 
     stage_id = fields.Many2one('server.stage', string='Stage', required=True, readonly=True)
+    # Which of the two backup formats to take. Defaulted from the button the user
+    # pressed (default_backup_format in the action context), but still switchable
+    # here so a wrong click doesn't mean closing and reopening the dialog.
+    backup_format = fields.Selection(
+        [('full', 'Full backup (database + filestore)'),
+         ('sql', 'Database only (dump.sql)')],
+        string='Format', required=True, default='full')
     # The user does ONE thing: either pick the database from the discovered list
     # (db_source='select') OR type it (db_source='manual') — never both.
     db_source = fields.Selection(
@@ -91,7 +98,11 @@ class ServerBackupDatabaseWizard(models.TransientModel):
         # whenever its own server-side pg_dump fails. The manual backup lands under a
         # FIXED manual/<category>/<server>/<db>.zip key (overwritten each press) and
         # the whole manual/ area is wiped daily at 03:00 by _cron_purge_manual.
-        def work(stg):
-            return stg.host_id._run_manual_backup(stg, db_name)
+        sql = self.backup_format == 'sql'
 
-        return stage._run_bg(_('Backup database %s') % db_name, work)
+        def work(stg):
+            return stg.host_id._run_manual_backup(stg, db_name, sql=sql)
+
+        label = (_('Database-only backup of %s') if sql
+                 else _('Backup database %s')) % db_name
+        return stage._run_bg(label, work)

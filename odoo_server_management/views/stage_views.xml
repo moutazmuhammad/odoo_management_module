@@ -182,8 +182,17 @@
                                  downloading an existing daily backup below is the first,
                                  resource-cheap choice; take a fresh one only when needed. -->
                             <button name="action_backup_database" type="object"
-                                    string="Backup Now" class="btn-secondary"
+                                    string="Full Backup (with Filestore)" class="btn-secondary"
                                     icon="fa-database"
+                                    groups="odoo_server_management.group_user"
+                                    attrs="{'invisible': ['|', ('can_backup', '=', False), ('op_state', '=', 'running')]}"/>
+                            <!-- Database-only variant: a plain pg_dump, no filestore.
+                                 Much smaller and quicker when the attachments aren't
+                                 needed (schema inspection, a dev refresh, a support
+                                 copy). Same dialog, pre-set to the SQL format. -->
+                            <button name="action_backup_database_sql" type="object"
+                                    string="Database Only (dump.sql)" class="btn-secondary"
+                                    icon="fa-file-code-o"
                                     groups="odoo_server_management.group_user"
                                     attrs="{'invisible': ['|', ('can_backup', '=', False), ('op_state', '=', 'running')]}"/>
                             <field name="backup_file_ids" readonly="1" nolabel="1">
@@ -204,8 +213,11 @@
                                 first (several days are kept per database). Click
                                 <b>Refresh List</b>, then <b>Download</b> the day you need — this
                                 is the recommended way, it reuses a backup already taken (no load
-                                on the server). Use <b>Backup Now</b> only when you need an
-                                up-to-the-minute copy; it dumps the live database on the server.
+                                on the server). Use <b>Full Backup (with Filestore)</b> only when
+                                you need an up-to-the-minute copy; it dumps the live database on
+                                the server. <b>Database Only (dump.sql)</b> is the same dump
+                                without the filestore — smaller and faster, but attachments are
+                                not included.
                                 Download gives a temporary link. For <b>Client Server</b> stages,
                                 only Tech Leads, Operators and Admins — or a Developer granted
                                 access on the <b>Access</b> page — may download or back up.
